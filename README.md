@@ -18,9 +18,11 @@
 
 ## 界面一览
 
-![Tailsend 桌面端](docs/screenshot-desktop.png)
+| 桌面端 | 手机端 |
+|---|---|
+| <img src="docs/screenshot-desktop.png" width="620" alt="Tailsend 桌面端"> | <img src="docs/screenshot-mobile.png" width="255" alt="Tailsend 手机端"> |
 
-*桌面端：左栏是 tailnet 节点列表（圆点小灯 = 实测过的可发送状态：绿=对方 Tailsend 在跑，黄=在线但没开 Tailsend，灰=离线），右侧拖文件进来或三种方式选择文件，底部收件箱列出收到的文件。手机端是同一套界面的自适应布局，节点列表换成「收藏目标」。*
+*桌面端：左栏是 tailnet 节点列表（圆点小灯 = 实测过的可发送状态：绿=对方 Tailsend 在跑，黄=在线但没开 Tailsend，灰=离线），右侧拖文件进来或三种方式选择文件，底部收件箱列出收到的文件。手机端是同一套界面的自适应布局，节点列表换成「收藏目标」（★ 跨会话保留、实时探测在线小灯）。*
 
 ## 前置条件：必须先安装并登录 Tailscale
 

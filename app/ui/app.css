@@ -651,8 +651,8 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
   .top, main { padding-left: 14px; padding-right: 14px; }
   .grid { grid-template-columns: 1fr; }
   .peers { max-height: 320px; }
-  .statusbar { width: 100%; justify-content: space-between; }
-  .seg { max-width: none; }
+  .statusbar { width: 100%; justify-content: space-between; flex-wrap: wrap; row-gap: 2px; }
+  .seg { max-width: 100%; min-width: 0; }
   .drop { padding: 24px 12px 20px; }
   .sendbar { flex-wrap: wrap; }
   .send { flex: 1; }

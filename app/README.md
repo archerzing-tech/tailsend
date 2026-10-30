@@ -2,7 +2,9 @@
 
 Tailsend 的图形界面版：桌面 + 手机，一套 Rust 核心。
 
-![Tailsend 界面](../docs/screenshot-desktop.png)
+| 桌面 | 手机 |
+|---|---|
+| <img src="../docs/screenshot-desktop.png" width="600" alt="Tailsend 桌面端"> | <img src="../docs/screenshot-mobile.png" width="238" alt="Tailsend 手机端"> |
 
 ```
 ┌────────────── ui/（HTML/CSS/JS，无打包器）──────────────┐
