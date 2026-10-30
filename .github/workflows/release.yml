@@ -106,7 +106,7 @@ jobs:
           npx tauri android build --target aarch64 --apk
           apk=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
           echo "found: $apk"
-          cp "$apk" "Tailsend-${{ github.ref_name }}-android-armv8.apk"
+          cp "$apk" "$GITHUB_WORKSPACE/Tailsend-${{ github.ref_name }}-android-armv8.apk"
       - name: Build armv7 (armeabi-v7a) APK
         working-directory: app
         env:
@@ -119,13 +119,16 @@ jobs:
           npx tauri android build --target armv7 --apk
           apk=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
           echo "found: $apk"
-          cp "$apk" "Tailsend-${{ github.ref_name }}-android-armv7.apk"
-      - name: Verify signatures
+          cp "$apk" "$GITHUB_WORKSPACE/Tailsend-${{ github.ref_name }}-android-armv7.apk"
+      - name: Verify signatures and ABIs
+        env:
+          V8: Tailsend-${{ github.ref_name }}-android-armv8.apk
+          V7: Tailsend-${{ github.ref_name }}-android-armv7.apk
         run: |
           APKSIGNER=$(ls "$ANDROID_HOME/build-tools/"*/apksigner | sort | tail -1)
-          $APKSIGNER verify "Tailsend-${{ github.ref_name }}-android-armv8.apk"
-          $APKSIGNER verify "Tailsend-${{ github.ref_name }}-android-armv7.apk"
-          echo "both APKs signed"
+          $APKSIGNER verify "$V8" && $APKSIGNER verify "$V7" && echo "signatures OK"
+          unzip -l "$V8" | grep -q "lib/arm64-v8a/" && ! unzip -l "$V8" | grep -q "lib/armeabi-v7a/" && echo "armv8 APK: arm64-v8a only"
+          unzip -l "$V7" | grep -q "lib/armeabi-v7a/" && ! unzip -l "$V7" | grep -q "lib/arm64-v8a/" && echo "armv7 APK: armeabi-v7a only"
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
