@@ -16,6 +16,19 @@
 - **发送** — 把文件或目录发给选中的节点
 - **接收** — 在本机启动接收端，等别人发文件过来
 
+## 前置条件：必须先安装并登录 Tailscale
+
+**Tailsend 不自带组网能力，它完全依赖 [Tailscale](https://tailscale.com) 传输。** 没装 Tailscale 或没连上 tailnet 时，节点列表为空、收发都会失败。开始之前：
+
+1. **每台要收发文件的设备都装好 Tailscale 并登录同一个 tailnet**（官网注册免费，最多 100 台设备）；
+   - 电脑：[tailscale.com/download](https://tailscale.com/download)（macOS / Windows / Linux）
+   - 手机：应用商店搜 "Tailscale"（Android / iOS）
+2. **桌面端（GUI 和 Go CLI）还需要 `tailscale` 命令行可用**——节点发现靠它执行 `tailscale status --json`。Linux/Windows 装官方包即自带；macOS 若用 App Store 版 Tailscale，Tailsend 会自动找 `/Applications/Tailscale.app` 内置的 CLI，无需额外配置；
+3. **手机端不用 CLI**：装 Tailscale App 并连上（VPN 图标亮起）即可；Tailsend 手机版的节点列表用「收藏目标」代替，首次使用输入对方 IP，之后自动记住并探测在线；
+4. 确认设备间能互通：终端里 `tailscale status` 能看到对方、`ping 100.x.y.z`（对方的 Tailscale IP）能通，Tailsend 就能用。
+
+自建/第三方控制面（如 Headscale）也支持——只要设备上的 Tailscale 客户端正常工作即可，Tailsend 不关心控制面是谁。
+
 ## 工作原理
 
 ```
@@ -210,7 +223,7 @@ tailsend/
 | | |
 |---|---|
 | 发现 | `tailscale status --json`（CLI 与 GUI 桌面端共用这一条路径） |
-| 握手 | `GET /api/ping` → `{"ok":true,"name":…,"version":…}` |
+| 握手 | `GET /api/ping` → `{"ok":true,"name":…,"version":…,"your_ip":…}`（`your_ip` = 调用方在接收端眼里看到的 IP，供移动端得知自己的 tailnet 地址） |
 | 传输 | `POST /api/upload`，multipart；`sender` 字段 + `file` 部分，文件名 = 百分号编码的相对路径 |
 | 鉴权 | 可选共享密钥，放 `X-Tailsend-Token` 头，常数时间比较 |
 | 安全 | 路径清洗（拍平 `../`）、同名自动 `(1)`、`.part` 临时文件 + 原子改名、可限单文件大小 |

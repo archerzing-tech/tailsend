@@ -136,6 +136,20 @@ function removeTarget(addr) {
 // "1.2.3.4:4782" -> "1.2.3.4" (tailnet addresses are IPv4)
 const hostOf = (a) => (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(a) ? a.slice(0, a.indexOf(":")) : a);
 
+// True when a Tailsend receiver answers at addr (short, token-authed ping).
+async function probeAddr(addr) {
+  try {
+    const r = await invoke("ping_peer", { target: addr });
+    if (r.your_ip) rememberSelfIp(r.your_ip);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Sort rank: sendable first, then "node up but receiver down", then offline.
+const rank = (p) => (p.recv === true ? 0 : p.online ? 1 : 2);
+
 async function probeSaved() {
   await Promise.all(loadSaved().map(async (t) => {
     try {
@@ -190,28 +204,47 @@ async function loadPeers() {
       }
       peers = d.peers || [];
     }
-    peers.forEach((p) => {
-      const k = p.ip + "|" + p.name;
-      p.fresh = prevOnline.get(k) === false && p.online;
-      prevOnline.set(k, p.online);
-    });
+    peers.forEach((p) => { p.recv = undefined; }); // receiver probe pending
     // Merge saved targets, probing the ones discovery can't see (mobile).
     await probeSaved();
     saved.forEach((t) => {
       const host = hostOf(t.addr);
       const known = peers.find((p) => p.ip === host || p.ip === t.addr);
-      if (known) { known.saved = true; return; }
-      const st = savedOnline.get(t.addr) || {};
+      const st = savedOnline.get(t.addr);
+      if (known) {
+        known.saved = true;
+        if (st) { known.recv = st.online; known.online = st.online; }
+        return;
+      }
+      const st2 = st || {};
       peers.push({
         ip: t.addr,
-        name: st.name || t.label || t.addr,
-        online: !!st.online,
+        name: st2.name || t.label || t.addr,
+        online: !!st2.online,
+        recv: !!st2.online,
         os: "",
         fqdn: "",
         saved: true,
       });
     });
     peers.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
+    renderPeers(); // immediate paint: discovery status + saved probes
+
+    // Green means "Tailsend receiver is actually up" — tailscale's online
+    // flag alone can't tell us that, so ask the peers it thinks are online.
+    // A node that's up without Tailsend running shows amber, not green.
+    await Promise.all(
+      peers
+        .filter((p) => p.online && p.recv === undefined)
+        .map(async (p) => { p.recv = await probeAddr(p.ip); })
+    );
+    peers.forEach((p) => {
+      const k = p.ip + "|" + p.name;
+      const up = p.recv === true;
+      p.fresh = prevOnline.get(k) === false && up;
+      prevOnline.set(k, up);
+    });
+    peers.sort((a, b) => rank(a) - rank(b));
     // Drop a stale selection if its peer vanished from the tailnet.
     if (selKey && !peers.some((p) => p.ip + "|" + p.name === selKey)) {
       selKey = null;
@@ -230,16 +263,24 @@ async function loadPeers() {
 
 function renderPeers() {
   const el = $("peers");
-  const online = peers.filter((p) => p.online).length;
-  $("peers-count").textContent = peers.length ? `（${online}/${peers.length} 在线）` : "";
+  const ready = peers.filter((p) => p.recv === true || (p.recv === undefined && p.online)).length;
+  $("peers-count").textContent = peers.length ? `（${ready}/${peers.length} 可发送）` : "";
   if (!peers.length) {
     el.innerHTML = '<div class="empty">tailnet 里没有其他节点</div>';
     return;
   }
+  // LED semantics: green = receiver up (sendable), amber = node online but
+  // its Tailsend isn't running, gray = node offline in tailscale.
+  const ledClass = (p) =>
+    p.recv === false && p.online ? "idle" : p.online || p.recv === true ? "" : "off";
+  const hint = (p) =>
+    p.recv === true ? " · 可发送"
+    : p.recv === false && p.online ? " · 在线，但对方 Tailsend 未在运行"
+    : p.online ? " · 在线" : " · 离线";
   el.innerHTML = peers.map((p, i) => {
     const sel = selKey !== null && p.ip + "|" + p.name === selKey;
     return `
-    <div class="peer ${p.online ? "" : "off"} ${sel ? "sel" : ""} ${p.fresh ? "fresh" : ""}" data-i="${i}" title="${esc(p.fqdn || p.name)}${p.online ? " · 在线" : " · 离线"}">
+    <div class="peer ${ledClass(p)} ${sel ? "sel" : ""} ${p.fresh ? "fresh" : ""}" data-i="${i}" title="${esc(p.fqdn || p.name)}${hint(p)}">
       <i class="led" aria-hidden="true"></i>
       <span class="meta">
         <span class="name">${p.saved ? '<i class="star" title="收藏的目标">★</i>' : ""}${esc(p.name)}${sel ? '<i class="selmark">已选</i>' : ""}</span>

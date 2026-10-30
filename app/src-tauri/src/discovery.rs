@@ -39,7 +39,7 @@ struct TsPeer {
     os: String,
     #[serde(rename = "TailscaleIPs", default)]
     tailscale_ips: Vec<String>,
-    #[serde(default)]
+    #[serde(rename = "Online", default)]
     online: bool,
     #[serde(rename = "LastSeen", default)]
     last_seen: String,
