@@ -14,6 +14,7 @@ pub fn run() {
             commands::list_peers,
             commands::ping_peer,
             commands::restart_receiver,
+            commands::set_receiver_token,
             commands::pick_files,
             commands::pick_folders,
             commands::stat_paths,

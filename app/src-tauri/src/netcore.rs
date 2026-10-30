@@ -1,6 +1,7 @@
 // Transfer core: the HTTP receiver (axum) and the streaming sender (reqwest).
 // Wire-compatible with the Go CLI in the repo root — same endpoints, headers
 // and percent-encoded relative paths, so both ends can talk to each other.
+use std::time::Duration;
 use axum::{
     extract::{connect_info::ConnectInfo, DefaultBodyLimit, Multipart, State},
     http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
@@ -30,9 +31,32 @@ pub const DATA_CAP: u64 = 1024 * 1024 * 1024;
 // unreserved characters; "/" becomes %2F so relative paths survive headers.
 const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.').remove(b'~');
 
+// Data-plane client: no total deadline (a multi-GB stream may legitimately
+// run for hours), but connect and per-read stalls are bounded so a hung
+// receiver can't freeze a transfer indefinitely.
 fn client() -> &'static reqwest::Client {
     static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    C.get_or_init(reqwest::Client::new)
+    C.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(60))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .expect("reqwest client")
+    })
+}
+
+// Control-plane client (begin/complete/abort): tiny envelopes, so a total
+// deadline is safe here.
+fn ctrl_client() -> &'static reqwest::Client {
+    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(60))
+            .build()
+            .expect("reqwest client")
+    })
 }
 
 pub fn host_name() -> String {
@@ -56,15 +80,32 @@ pub struct RecvCfg {
 }
 
 pub fn router(cfg: RecvCfg) -> Router {
+    // Per-route body caps, enforced while the body streams in (a global
+    // disable would buffer arbitrary request bodies in memory before any
+    // handler check runs). Only the streaming v1 route is unlimited — it
+    // enforces `max` itself while writing to disk.
+    const CTRL_BODY_MAX: usize = 1 << 20;
+    const CHUNK_BODY_MAX: usize = (UPLOAD_CHUNK as usize) + (1 << 20);
     Router::new()
         .route("/", get(info))
         .route("/api/ping", get(ping_info))
-        .route("/api/upload", post(upload))
-        .route("/api/upload/begin", post(upload_begin))
-        .route("/api/upload/chunk", post(upload_chunk))
-        .route("/api/upload/complete", post(upload_complete))
-        .route("/api/upload/abort", post(upload_abort))
-        .layer(DefaultBodyLimit::disable())
+        .route("/api/upload", post(upload).layer(DefaultBodyLimit::disable()))
+        .route(
+            "/api/upload/begin",
+            post(upload_begin).layer(DefaultBodyLimit::max(CTRL_BODY_MAX)),
+        )
+        .route(
+            "/api/upload/chunk",
+            post(upload_chunk).layer(DefaultBodyLimit::max(CHUNK_BODY_MAX)),
+        )
+        .route(
+            "/api/upload/complete",
+            post(upload_complete).layer(DefaultBodyLimit::max(CTRL_BODY_MAX)),
+        )
+        .route(
+            "/api/upload/abort",
+            post(upload_abort).layer(DefaultBodyLimit::max(CTRL_BODY_MAX)),
+        )
         .with_state(cfg)
 }
 
@@ -183,10 +224,12 @@ async fn save_stream(
     max: u64,
 ) -> Result<u64, SaveErr> {
     // Unique per upload: two simultaneous receives of the same filename must
-    // not share one .part file.
+    // not share one .part file. The distinctive "tailsend" marker lets the
+    // startup sweep recognize crash leftovers without touching the user's
+    // own "*.part-1" split archives.
     static PART_SEQ: AtomicU64 = AtomicU64::new(0);
     let mut tmp = dest.as_os_str().to_os_string();
-    tmp.push(format!(".part-{}", PART_SEQ.fetch_add(1, Ordering::Relaxed)));
+    tmp.push(format!(".part-tailsend-{}", PART_SEQ.fetch_add(1, Ordering::Relaxed)));
     let tmp = PathBuf::from(tmp);
     let mut f = tokio::fs::File::create(&tmp)
         .await
@@ -238,6 +281,9 @@ async fn save_stream(
 // simultaneous uploads from multiple senders by design.
 
 pub const UPLOAD_CHUNK: u64 = 4 * 1024 * 1024;
+// Sanity cap on declared sizes (Go-side constant twin): a huge declaration
+// only ever produces sparse spool files that turn into garbage.
+pub const MAX_DECLARED_SIZE: u64 = 1 << 50; // 1 PiB
 
 pub struct Upload {
     pub final_path: PathBuf,
@@ -247,6 +293,7 @@ pub struct Upload {
     pub sender: String,
     pub file: tokio::fs::File,
     pub received: BTreeSet<u64>,
+    pub last: std::time::Instant, // last chunk arrival; the janitor reaps idles
 }
 
 pub type UploadRegistry = Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Upload>>>>>;
@@ -285,6 +332,9 @@ async fn upload_begin(
             format!("文件超过限制（{}）", human(size as i64)),
         );
     }
+    if size > MAX_DECLARED_SIZE {
+        return err_json(StatusCode::BAD_REQUEST, "声明的文件大小异常");
+    }
     let dest = match safe_join(&cfg.dir, &name) {
         Ok(d) => unique_path(d),
         Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
@@ -311,6 +361,7 @@ async fn upload_begin(
             sender,
             file,
             received: BTreeSet::new(),
+            last: std::time::Instant::now(),
         })),
     );
     Json(json!({ "ok": true, "id": id, "chunk": UPLOAD_CHUNK })).into_response()
@@ -352,6 +403,7 @@ async fn upload_chunk(
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("写入失败：{e}"));
     }
     u.received.insert(idx);
+    u.last = std::time::Instant::now();
     Json(json!({ "ok": true, "received": u.received.len() })).into_response()
 }
 
@@ -379,10 +431,19 @@ async fn upload_complete(
         cfg.uploads.lock().unwrap().insert(id, up.clone());
         return err_json(StatusCode::CONFLICT, format!("缺少 {missing} 个分块"));
     }
+    // The spool must be exactly the declared size before it ships; and on
+    // failure the upload goes back in the registry so the sender can retry
+    // complete instead of stranding the spool with no way back.
+    if let Err(e) = u.file.set_len(u.size).await {
+        cfg.uploads.lock().unwrap().insert(id, up.clone());
+        return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("截断失败：{e}"));
+    }
     if let Err(e) = u.file.flush().await {
+        cfg.uploads.lock().unwrap().insert(id, up.clone());
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("flush 失败：{e}"));
     }
     if let Err(e) = u.file.sync_all().await {
+        cfg.uploads.lock().unwrap().insert(id, up.clone());
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("sync 失败：{e}"));
     }
     let (tmp, mut final_path, size, sender) =
@@ -467,6 +528,11 @@ fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, String> {
             "" | "." => continue,
             ".." => return Err(format!("拒绝可疑路径 “{rel}”")),
             s => {
+                // A Windows drive prefix ("C:/...") makes path resolution jump
+                // out of the save directory; refuse it everywhere.
+                if is_drive_prefix(s) {
+                    return Err(format!("拒绝可疑路径 “{rel}”"));
+                }
                 out.push(s);
                 any = true;
             }
@@ -500,6 +566,88 @@ fn unique_path(dest: PathBuf) -> PathBuf {
         }
     }
     dir.join(format!("{stem} (dup){ext}"))
+}
+
+// True for the transient names both implementations write: v2 spools
+// (.tspart-…), the Go v1 partial (.part-<12 hex>) and the Rust v1 partial
+// (.part-tailsend-<seq>). A user's own "file.part-1" split archives never
+// match (Go-side twin: isTempName).
+fn is_temp_name(name: &str) -> bool {
+    if let Some(i) = name.rfind(".tspart-") {
+        let s = &name[i + ".tspart-".len()..];
+        if is_hex_len(s, 16) || is_rust_upload_id(s) {
+            return true;
+        }
+    }
+    if let Some(i) = name.rfind(".part-") {
+        let s = &name[i + ".part-".len()..];
+        if is_hex_len(s, 12) || s.starts_with("tailsend-") {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_hex_len(s: &str, n: usize) -> bool {
+    s.len() == n && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+// Matches the ids this file generates: "u<pid>-<seq>".
+fn is_rust_upload_id(s: &str) -> bool {
+    match s.split_once('-') {
+        Some((a, b)) => {
+            a.len() > 1
+                && a.starts_with('u')
+                && a[1..].bytes().all(|b| b.is_ascii_digit())
+                && !b.is_empty()
+                && b.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
+    }
+}
+
+fn is_drive_prefix(seg: &str) -> bool {
+    let b = seg.as_bytes();
+    b.len() >= 2
+        && b[1] == b':'
+        && (b[0].is_ascii_lowercase() || b[0].is_ascii_uppercase())
+}
+
+// Delete .tspart-*/.part-* leftovers from a crashed run. Only safe while the
+// receiver is not serving — the registry is empty, so nothing live can own
+// one of these files (called once from state::start_receiver).
+pub fn sweep_spools(dir: &Path) {
+    for e in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+        if e.file_type().is_file() && is_temp_name(&e.file_name().to_string_lossy()) {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+// Reap uploads whose sender went quiet: without this a crashed sender would
+// leave its spool file and registry entry behind forever.
+pub async fn janitor(cfg: RecvCfg) {
+    const TICK: Duration = Duration::from_secs(600);
+    const IDLE: Duration = Duration::from_secs(3600);
+    loop {
+        tokio::time::sleep(TICK).await;
+        let mut stale: Vec<(String, PathBuf)> = Vec::new();
+        {
+            let reg = cfg.uploads.lock().unwrap();
+            for (id, up) in reg.iter() {
+                // try_lock: a held lock means chunks are actively arriving.
+                if let Ok(u) = up.try_lock() {
+                    if u.last.elapsed() > IDLE {
+                        stale.push((id.clone(), u.tmp.clone()));
+                    }
+                }
+            }
+        }
+        for (id, tmp) in stale {
+            cfg.uploads.lock().unwrap().remove(&id);
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+    }
 }
 
 // ---------------------------------------------------------------- sender
@@ -852,7 +1000,7 @@ async fn post_json(
     path: &str,
     value: &serde_json::Value,
 ) -> Result<(StatusCode, bytes::Bytes), String> {
-    let mut req = client().post(format!("http://{addr}{path}")).json(value);
+    let mut req = ctrl_client().post(format!("http://{addr}{path}")).json(value);
     if !token.is_empty() {
         req = req.header("X-Tailsend-Token", token);
     }

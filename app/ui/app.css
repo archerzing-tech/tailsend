@@ -392,6 +392,30 @@ button:focus-visible, input:focus-visible {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+/* Receiver token (inbox card): same input look as the manual target row. */
+.token-row {
+  display: flex;
+  gap: 8px;
+  padding: 12px 20px 0;
+}
+.token-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  padding: 7px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+}
+.token-row input:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 /* ---------------------------------------------------------------- send */
 
 .linkstrip {
@@ -673,7 +697,7 @@ button.ghost.on {
   /* Touch targets: keep the delete affordance visible, and keep inputs at
      16px so iOS Safari doesn't zoom the page on focus. */
   .peer .fx-del { opacity: 1; }
-  .manual input { font-size: 16px; }
+  .manual input, .token-row input { font-size: 16px; }
 
   /* Send and inbox own the page; the node list collapses into a sheet that
      drops from the target bar — one tap away, not a permanent panel. */
@@ -784,6 +808,14 @@ button.ghost.on {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .peers-card, .sheet-backdrop { animation: none; }
+  /* Match the compound selectors that set the animations, or they win on
+     specificity (.inbox li.new) / source order (body.sheet-open …). */
+  .peers-card,
+  .sheet-backdrop,
+  body.sheet-open .peers-card,
+  body.sheet-open .sheet-backdrop,
+  .inbox li.new {
+    animation: none;
+  }
   .targetbar .tb-chev { transition: none; }
 }

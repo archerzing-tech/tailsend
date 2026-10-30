@@ -9,6 +9,9 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 pub struct AppState {
     pub recv: Mutex<RecvState>,
+    // Serializes start_receiver: without it a manual restart and a bootstrap
+    // retry can both pass the listening check and race on the bind.
+    pub start_lock: tokio::sync::Mutex<()>,
     pub batch_seq: AtomicU64,
     pub data_seq: AtomicU64,
     pub slots: Mutex<HashMap<u64, Slot>>,
@@ -76,6 +79,7 @@ impl AppState {
                 max: 0,
                 shutdown: None,
             }),
+            start_lock: tokio::sync::Mutex::new(()),
             batch_seq: AtomicU64::new(1),
             data_seq: AtomicU64::new(1),
             slots: Mutex::new(HashMap::new()),
@@ -97,6 +101,7 @@ impl AppState {
 
 // Bind the tailnet receiver; on failure record why and keep serving the UI.
 pub async fn start_receiver(state: &AppState) -> Result<(), String> {
+    let _serial = state.start_lock.lock().await;
     {
         let rs = state.recv.lock().unwrap();
         if rs.listening {
@@ -137,6 +142,13 @@ pub async fn start_receiver(state: &AppState) -> Result<(), String> {
             uploads: std::sync::Arc::default(),
         }
     };
+    // Crash leftovers from a previous run: clean before serving so the sweep
+    // can never race a live upload (awaited on purpose).
+    {
+        let dir = cfg.dir.clone();
+        let _ = tauri::async_runtime::spawn_blocking(move || crate::netcore::sweep_spools(&dir)).await;
+    }
+    tauri::async_runtime::spawn(crate::netcore::janitor(cfg.clone()));
     let serve = axum::serve(
         ln,
         crate::netcore::router(cfg).into_make_service_with_connect_info::<std::net::SocketAddr>(),

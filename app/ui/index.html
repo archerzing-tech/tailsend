@@ -110,7 +110,15 @@
         <section class="card inbox-card">
           <div class="card-head">
             <h2>收件箱 <span class="count" id="inbox-count"></span></h2>
-            <button class="ghost" id="btn-open">打开文件夹</button>
+            <span class="head-btns">
+              <button class="ghost" id="btn-token" aria-expanded="false">令牌</button>
+              <button class="ghost" id="btn-open">打开文件夹</button>
+            </span>
+          </div>
+          <div class="token-row" id="token-row" hidden>
+            <input id="rx-token" type="password" spellcheck="false" autocomplete="off"
+                   placeholder="接收令牌（留空 = 不校验，发信方需填同一个）" />
+            <button class="ghost" id="btn-token-save">保存</button>
           </div>
           <ul class="inbox" id="inbox"></ul>
         </section>

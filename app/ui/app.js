@@ -249,7 +249,9 @@ async function loadPeers() {
     peers.sort((a, b) => rank(a) - rank(b));
     // Drop selections whose peer vanished from the tailnet (manual ones stay).
     if (targets.length) {
-      const alive = targets.filter((t) => peers.some((p) => peerKey(p) === t.key));
+      const alive = targets.filter(
+        (t) => t.key.startsWith("m|") || peers.some((p) => peerKey(p) === t.key)
+      );
       if (alive.length !== targets.length) {
         targets = alive;
         updateTargetUI();
@@ -311,15 +313,16 @@ function choosePeer(i) {
   const p = peers[i];
   if (!p) return;
   const key = peerKey(p);
+  const addr = p.ip || p.name;
   const hit = targets.find((t) => t.key === key);
   if (multiSel) {
-    // 多选：点击把节点加入/移出目标集合
+    // 多选：点击把节点加入/移出目标集合（同地址只保留一条，避免重复投递）
     targets = hit ? targets.filter((t) => t !== hit)
-      : [...targets, { key, label: p.name, addr: p.ip || p.name }];
+      : [...targets.filter((t) => t.addr !== addr), { key, label: p.name, addr }];
   } else if (hit && targets.length === 1) {
     targets = []; // 再点一次已选节点 = 取消
   } else {
-    targets = [{ key, label: p.name, addr: p.ip || p.name }];
+    targets = [{ key, label: p.name, addr }]; // 单选 = 整体替换（保留原切换手感）
   }
   $("manual").value = "";
   renderPeers();
@@ -332,15 +335,29 @@ function setManualTarget() {
   const hit = targets.find((t) => t.addr === v);
   if (multiSel) {
     targets = hit ? targets.filter((t) => t !== hit)
-      : [...targets, { key: "m|" + v, label: v, addr: v }];
+      : [...targets.filter((t) => t.addr !== v), { key: "m|" + v, label: v, addr: v }];
   } else if (hit && targets.length === 1) {
     targets = [];
   } else {
-    targets = [{ key: "m|" + v, label: v, addr: v }];
+    targets = [{ key: "m|" + v, label: v, addr: v }]; // 单选 = 整体替换
   }
-  saveTarget(v, v);
+  if (!hit) saveTarget(v, v); // 只在真正加入时收藏；取消选择不把收藏复活
   renderPeers();
   updateTargetUI();
+}
+
+async function saveReceiverToken() {
+  const v = $("rx-token").value.trim();
+  try {
+    await invoke("set_receiver_token", { token: v });
+    try { localStorage.setItem("ts.token.v1", v); } catch { /* ignore */ }
+    $("token-row").hidden = true;
+    $("btn-token").setAttribute("aria-expanded", "false");
+    toast(v ? "接收令牌已启用，接收端已重启" : "接收令牌已清除，接收端已重启", "ok");
+    loadStatus();
+  } catch (e) {
+    toast("令牌保存失败：" + e, "err");
+  }
 }
 
 const targetNames = () => targets.map((t) => t.label).join("、");
@@ -564,7 +581,9 @@ async function send() {
       }
       doneBytes += item.size;
       item.tried++;
-      if (item.tried >= targets.length) {
+      // perTarget is a snapshot on purpose: targets[] may change mid-send
+      // (multi-select is still live), and completion must not depend on it.
+      if (item.tried >= perTarget.length) {
         item.status = item.okN === item.tried ? "done" : "error";
         if (item.status === "error") item.error = "部分目标接收失败，详见上方提示";
         item.loaded = item.okN ? item.size : 0;
@@ -582,7 +601,7 @@ async function send() {
   toast(
     failc
       ? `发送完成：${okc} 成功 / ${failc} 失败${bad.length ? `（${bad.join("、")}）` : ""}`
-      : `已发送 ${okc} 个文件给 ${targets.length} 个目标`,
+      : `已发送 ${okc} 个文件给 ${perTarget.length} 个目标`,
     failc ? "err" : "ok"
   );
   loadInbox();
@@ -633,6 +652,15 @@ function wire() {
   $("btn-open").onclick = async () => {
     try { await invoke("open_inbox"); } catch (e) { toast(String(e), "err"); }
   };
+  // Receiver token: optional shared secret senders must quote.
+  $("btn-token").onclick = () => {
+    const row = $("token-row");
+    row.hidden = !row.hidden;
+    $("btn-token").setAttribute("aria-expanded", String(!row.hidden));
+    if (!row.hidden) $("rx-token").focus();
+  };
+  $("btn-token-save").onclick = saveReceiverToken;
+  $("rx-token").addEventListener("keydown", (e) => { if (e.key === "Enter") saveReceiverToken(); });
   $("btn-pick").onclick = async () => {
     try {
       const r = await invoke("pick_files");
@@ -683,6 +711,14 @@ function wire() {
 
   // Restore the last known tailnet address until a fresh probe confirms it.
   try { const ip = localStorage.getItem("ts.myip"); if (ip) rememberSelfIp(ip); } catch { /* ignore */ }
+  // Re-apply a saved receiver token at boot (the core starts with none).
+  try {
+    const t = localStorage.getItem("ts.token.v1");
+    if (t) {
+      $("rx-token").value = t;
+      invoke("set_receiver_token", { token: t }).catch(() => {});
+    }
+  } catch { /* ignore */ }
 
   loadStatus();
   loadPeers();

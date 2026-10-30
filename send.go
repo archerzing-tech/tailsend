@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -81,6 +82,23 @@ const (
 // errOldReceiver tells uploadFile to retry the file over the v1 multipart
 // path, for receivers that predate the chunked protocol.
 var errOldReceiver = errors.New("receiver does not support chunked upload")
+
+// httpClient bounds stalls without capping total transfer time: dial and
+// response-header deadlines apply to every request, and chunk uploads add a
+// per-attempt context timeout (4 MiB in 2 min ≈ a 35 KB/s floor). The bare
+// http.DefaultClient would hang forever on a receiver that stalls mid-send.
+var httpClient = &http.Client{
+	Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ResponseHeaderTimeout: 30 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+		MaxIdleConnsPerHost:   chunkConcurrent,
+	},
+}
+
+// chunkTimeout bounds one chunk upload attempt, connect to response.
+const chunkTimeout = 2 * time.Minute
 
 func cmdSend(args []string) {
 	fs := flag.NewFlagSet("send", flag.ExitOnError)
@@ -418,8 +436,10 @@ func sendChunk(addr, token, id string, src *os.File, j chunkSpan) error {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * 500 * time.Millisecond)
 		}
-		req, rerr := http.NewRequest("POST", "http://"+addr+"/api/upload/chunk", io.NewSectionReader(src, j.off, j.n))
+		ctx, cancel := context.WithTimeout(context.Background(), chunkTimeout)
+		req, rerr := http.NewRequestWithContext(ctx, "POST", "http://"+addr+"/api/upload/chunk", io.NewSectionReader(src, j.off, j.n))
 		if rerr != nil {
+			cancel()
 			return rerr // a bad request never gets better by retrying
 		}
 		req.ContentLength = j.n
@@ -428,14 +448,16 @@ func sendChunk(addr, token, id string, src *os.File, j chunkSpan) error {
 		if token != "" {
 			req.Header.Set("X-Tailsend-Token", token)
 		}
-		resp, rerr := http.DefaultClient.Do(req)
+		resp, rerr := httpClient.Do(req)
 		if rerr != nil {
+			cancel()
 			err = rerr
 			continue
 		}
 		var cr chunkResult
 		derr := json.NewDecoder(resp.Body).Decode(&cr)
 		resp.Body.Close()
+		cancel()
 		if resp.StatusCode == http.StatusOK && derr == nil && cr.OK {
 			return nil
 		}
@@ -472,7 +494,7 @@ func postJSON(url, token string, v any) (*http.Response, error) {
 	if token != "" {
 		req.Header.Set("X-Tailsend-Token", token)
 	}
-	return http.DefaultClient.Do(req)
+	return httpClient.Do(req)
 }
 
 // uploadOne streams one file as a multipart POST. The body is produced by a
@@ -515,7 +537,7 @@ func uploadOne(addr, token, sender string, f fileToSend, showProgress bool) erro
 		req.Header.Set("X-Tailsend-Token", token)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("upload failed: %v", err)
 	}

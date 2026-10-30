@@ -52,6 +52,25 @@ pub async fn restart_receiver(state: tauri::State<'_, AppState>) -> Result<(), S
     crate::state::start_receiver(&state).await
 }
 
+// Store the receiver's shared secret and rebind so it takes effect at once
+// (an empty token means "accept anything the tailnet lets through").
+#[tauri::command]
+pub async fn set_receiver_token(
+    state: tauri::State<'_, AppState>,
+    token: String,
+) -> Result<(), String> {
+    let token = token.trim().to_string();
+    {
+        let mut rs = state.recv.lock().unwrap();
+        if rs.token == token {
+            return Ok(());
+        }
+        rs.token = token;
+    }
+    crate::state::stop_receiver(&state);
+    crate::state::start_receiver(&state).await
+}
+
 #[tauri::command]
 pub async fn pick_files() -> Result<Vec<String>, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]

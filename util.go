@@ -50,13 +50,6 @@ func humanAgo(t time.Time) string {
 	}
 }
 
-func trunc(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "..."
-}
-
 func plural(word string, n int) string {
 	if n == 1 {
 		return word
@@ -94,6 +87,10 @@ func uniquePath(dest string) string {
 // ids and unique temp-file suffixes.
 func randomHex(n int) string {
 	b := make([]byte, n)
-	rand.Read(b) // crypto/rand.Read never returns an error
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand can only fail if the OS entropy source is broken; a
+		// silent all-zero id would collide between concurrent uploads.
+		panic("crypto/rand unavailable: " + err.Error())
+	}
 	return hex.EncodeToString(b)
 }

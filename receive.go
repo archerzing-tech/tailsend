@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"mime"
 	"mime/multipart"
 	"net"
@@ -122,6 +124,10 @@ func cmdReceive(args []string) {
 	// Chunked upload (v2): begin/chunk/complete/abort, for senders that
 	// parallelize and retry pieces of a file. v1 above stays for old senders.
 	uploads := &uploadStore{uploads: map[string]*chunkUpload{}}
+	// Leftover spools from a crashed run: the registry is empty at boot, so
+	// nothing live can own one of these yet.
+	sweepSpoolFiles(saveDir)
+	go janitor(uploads)
 	mux.HandleFunc("/api/upload/begin", func(w http.ResponseWriter, r *http.Request) {
 		uploads.handleBegin(w, r, saveDir, *token, *max)
 	})
@@ -230,6 +236,7 @@ type chunkUpload struct {
 	mu       sync.Mutex // serializes writes to one upload; uploads don't share it
 	f        *os.File
 	received map[int64]struct{}
+	last     time.Time // last chunk arrival; the janitor reaps idle uploads
 }
 
 // uploadStore holds every in-flight v2 upload keyed by its opaque id.
@@ -263,10 +270,19 @@ func (s *uploadStore) drop(id string) *chunkUpload {
 	return up
 }
 
-// chunkCount is how many chunks a file of size bytes splits into.
+// chunkCount is how many chunks a file of size bytes splits into. Written
+// overflow-free so an absurd declared size can't wrap `total` negative and
+// make complete succeed with zero chunks.
 func chunkCount(size, chunk int64) int64 {
-	return (size + chunk - 1) / chunk
+	if size <= 0 || chunk <= 0 {
+		return 0
+	}
+	return (size-1)/chunk + 1
 }
+
+// maxDeclaredSize is a sanity cap on the size a sender may declare at begin —
+// huge declared sizes create sparse spool files that only ever become garbage.
+const maxDeclaredSize = 1 << 50 // 1 PiB
 
 // handleBegin validates a v2 upload request, opens its spool file and hands
 // back the id the sender quotes on every later call.
@@ -296,6 +312,10 @@ func (s *uploadStore) handleBegin(w http.ResponseWriter, r *http.Request, saveDi
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": fmt.Sprintf("%s (%s)", errTooBig, human(max))})
 		return
 	}
+	if req.Size > maxDeclaredSize {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "declared size is unreasonably large"})
+		return
+	}
 	dest, err := safeJoin(saveDir, req.Name) // same cleaning as the v1 upload
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
@@ -314,6 +334,7 @@ func (s *uploadStore) handleBegin(w http.ResponseWriter, r *http.Request, saveDi
 		chunk:    defaultChunkSize,
 		sender:   strings.TrimSpace(req.Sender),
 		received: map[int64]struct{}{},
+		last:     time.Now(),
 	}
 	f, err := os.OpenFile(up.tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
@@ -352,6 +373,15 @@ func (s *uploadStore) handleChunk(w http.ResponseWriter, r *http.Request, token 
 		writeJSON(w, http.StatusNotFound, map[string]any{"ok": false, "error": "unknown upload id"})
 		return
 	}
+	// Read the whole chunk into memory (bounded by MaxBytesReader) before
+	// taking the upload's lock: a sender trickling bytes over the wire must
+	// not pin the lock and freeze complete/abort/other chunks. It also means
+	// an over-long body is rejected without any of it reaching the spool.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, up.chunk+1<<20))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad chunk body: " + err.Error()})
+		return
+	}
 	up.mu.Lock()
 	defer up.mu.Unlock()
 	total := chunkCount(up.size, up.chunk)
@@ -366,16 +396,16 @@ func (s *uploadStore) handleChunk(w http.ResponseWriter, r *http.Request, token 
 	}
 	// Anything over the chunk's room is rejected — and so is anything short of
 	// it, which would leave a hole in the spool file.
-	n, err := io.Copy(io.NewOffsetWriter(up.f, off), http.MaxBytesReader(w, r.Body, up.chunk+1<<20))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad chunk body: " + err.Error()})
+	if int64(len(body)) != room {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("chunk %d carried %s, expected %s", idx, human(int64(len(body))), human(room))})
 		return
 	}
-	if n != room {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("chunk %d carried %s, expected %s", idx, human(n), human(room))})
+	if _, err := io.Copy(io.NewOffsetWriter(up.f, off), bytes.NewReader(body)); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	up.received[idx] = struct{}{}
+	up.last = time.Now()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "received": len(up.received)})
 }
 
@@ -408,6 +438,27 @@ func (s *uploadStore) handleComplete(w http.ResponseWriter, r *http.Request, sav
 	if missing := chunkCount(up.size, up.chunk) - int64(len(up.received)); missing > 0 {
 		s.put(req.ID, up) // keep it registered for retry
 		writeJSON(w, http.StatusConflict, map[string]any{"ok": false, "error": fmt.Sprintf("missing %d %s", missing, plural("chunk", int(missing)))})
+		return
+	}
+	// The spool must be at least the declared size; trim anything past it so
+	// the final file is exactly what the sender promised, never more.
+	st, err := up.f.Stat()
+	if err != nil {
+		up.f.Close()
+		os.Remove(up.tmpPath)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+	if st.Size() < up.size {
+		up.f.Close()
+		os.Remove(up.tmpPath)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": fmt.Sprintf("spool is %s, expected %s — upload corrupt", human(st.Size()), human(up.size))})
+		return
+	}
+	if err := up.f.Truncate(up.size); err != nil {
+		up.f.Close()
+		os.Remove(up.tmpPath)
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	if err := up.f.Sync(); err != nil {
@@ -489,7 +540,10 @@ func saveStream(r io.Reader, dest string, max int64) (int64, error) {
 		os.Remove(tmp)
 		return n, err
 	}
-	if err := os.Rename(tmp, dest); err != nil {
+	// Re-check collisions right before the rename: the check at stream start
+	// is stale by upload's end, and two same-name transfers would otherwise
+	// silently overwrite each other.
+	if err := os.Rename(tmp, uniquePath(dest)); err != nil {
 		os.Remove(tmp)
 		return n, err
 	}
@@ -507,6 +561,11 @@ func safeJoin(base, rel string) (string, error) {
 		case "..":
 			return "", fmt.Errorf("refusing suspicious path %q", rel)
 		default:
+			// A Windows drive prefix ("C:/...") makes filepath resolution jump
+			// out of the save directory; refuse it everywhere for consistency.
+			if isDrivePrefix(seg) {
+				return "", fmt.Errorf("refusing suspicious path %q", rel)
+			}
 			parts = append(parts, seg)
 		}
 	}
@@ -544,4 +603,107 @@ func defaultSaveDir() string {
 		}
 	}
 	return "tailsend-inbox"
+}
+
+func isDrivePrefix(seg string) bool {
+	return len(seg) >= 2 && seg[1] == ':' &&
+		((seg[0] >= 'a' && seg[0] <= 'z') || (seg[0] >= 'A' && seg[0] <= 'Z'))
+}
+
+// sweepSpoolFiles deletes .tspart-*/.part-* leftovers from crashed transfers.
+// Only safe while the receiver is not serving: the upload registry is empty,
+// so no live upload can own one of these files.
+func sweepSpoolFiles(dir string) {
+	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil // best effort; unreadable entries are skipped
+		}
+		if isTempName(d.Name()) {
+			os.Remove(path)
+		}
+		return nil
+	})
+}
+
+// isTempName recognizes the transient names both implementations write:
+// v2 spools (.tspart-…), the Go v1 partial (.part-<12 hex>) and the Rust
+// v1 partial (.part-tailsend-<seq>). Ordinary "file.part-1" split archives
+// don't match any of these.
+func isTempName(name string) bool {
+	if i := strings.LastIndex(name, ".tspart-"); i >= 0 {
+		s := name[i+len(".tspart-"):]
+		if isHexLen(s, 16) || isRustUploadID(s) {
+			return true
+		}
+	}
+	if i := strings.LastIndex(name, ".part-"); i >= 0 {
+		s := name[i+len(".part-"):]
+		if isHexLen(s, 12) || strings.HasPrefix(s, "tailsend-") {
+			return true
+		}
+	}
+	return false
+}
+
+func isHexLen(s string, n int) bool {
+	if len(s) != n {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
+// isRustUploadID matches the Rust receiver's ids, "u<pid>-<seq>".
+func isRustUploadID(s string) bool {
+	a, b, ok := strings.Cut(s, "-")
+	return ok && len(a) > 1 && a[0] == 'u' && allDigits(a[1:]) && allDigits(b)
+}
+
+func allDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// uploadIdle is how long an upload may sit without a chunk before the janitor
+// reaps it: the sender is assumed gone.
+const uploadIdle = time.Hour
+
+// janitor reaps uploads whose sender went quiet — without it a crashed sender
+// would leave its spool file and registry entry behind forever.
+func janitor(s *uploadStore) {
+	t := time.NewTicker(10 * time.Minute)
+	for range t.C {
+		for _, up := range s.stale() {
+			up.mu.Lock()
+			up.f.Close()
+			os.Remove(up.tmpPath)
+			up.mu.Unlock()
+		}
+	}
+}
+
+// stale unregisters and returns the uploads idle for longer than uploadIdle.
+func (s *uploadStore) stale() []*chunkUpload {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []*chunkUpload
+	for id, up := range s.uploads {
+		if time.Since(up.last) > uploadIdle {
+			delete(s.uploads, id)
+			out = append(out, up)
+		}
+	}
+	return out
 }
