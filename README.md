@@ -72,7 +72,7 @@ GOOS=darwin  GOARCH=arm64 go build -o tailsend-macos-arm64 .
 
 ```console
 $ tailsend receive
-Tailsend receiver v0.1.0
+Tailsend receiver v0.0.1
 
   this machine : homelab-nas
   saving to    : /home/me/Downloads/Tailsend
