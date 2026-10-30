@@ -181,13 +181,23 @@ func cmdSend(args []string) {
 		fmt.Printf("Receiver %q saves into %s\n", ping.Name, ping.Dir)
 	}
 
+	// Consent (protocol v3): ask before the first byte moves. Receivers that
+	// predate consent answer 404 and the batch proceeds as before.
 	me, _ := os.Hostname()
+	reqID, err := requestTransfer(addr, *token, me, files)
+	if err != nil {
+		fatal("%v", err)
+	}
+	if reqID == "" {
+		fmt.Printf("Receiver %q is an older version; sending without the confirmation step\n", ping.Name)
+	}
+
 	tty := stdoutIsTTY()
 	sent, failed := 0, 0
 	started := time.Now()
 	for i, f := range files {
 		fmt.Printf("[%d/%d] %s (%s)\n", i+1, len(files), f.Rel, human(f.Size))
-		err := uploadFile(addr, *token, me, f, tty)
+		err := uploadFile(addr, *token, me, reqID, f, tty)
 		if tty {
 			fmt.Println()
 		}
@@ -304,12 +314,54 @@ func pingReceiver(addr, token string) (*pingResult, error) {
 	return &pr, nil
 }
 
+// requestTransfer asks the receiver for permission to start sending
+// (protocol v3). It returns the grant id to attach to every upload, or ""
+// when the receiver predates consent (no such route) and sending starts
+// as before.
+func requestTransfer(addr, token, sender string, files []fileToSend) (string, error) {
+	list := make([]map[string]any, 0, len(files))
+	var total int64
+	for _, f := range files {
+		total += f.Size
+		list = append(list, map[string]any{"name": f.Rel, "size": f.Size})
+	}
+	payload := map[string]any{"sender": sender, "count": len(files), "total": total, "files": list}
+
+	// The receiver may hold the request open up to confirmWait while a human
+	// decides; give the round trip a little headroom.
+	client := &http.Client{Timeout: confirmWait + 10*time.Second}
+	resp, err := postJSONClient("http://"+addr+"/api/request", token, payload, client)
+	if err != nil {
+		return "", fmt.Errorf("could not ask the receiver for permission: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNotImplemented {
+		return "", nil // old receiver: no consent, send as before
+	}
+	var rr struct {
+		OK     bool   `json:"ok"`
+		ID     string `json:"id"`
+		Reason string `json:"reason"`
+	}
+	derr := json.NewDecoder(resp.Body).Decode(&rr)
+	if resp.StatusCode == http.StatusOK && derr == nil && rr.OK {
+		return rr.ID, nil
+	}
+	switch rr.Reason {
+	case "timeout":
+		return "", fmt.Errorf("receiver did not confirm in time — transfer cancelled")
+	case "unattended":
+		return "", fmt.Errorf("receiver wants to confirm transfers but nobody is there to answer")
+	}
+	return "", fmt.Errorf("receiver declined the transfer")
+}
+
 // uploadFile sends one file over the chunked v2 protocol, falling back to the
 // v1 multipart upload when the receiver doesn't answer /api/upload/begin.
-func uploadFile(addr, token, sender string, f fileToSend, showProgress bool) error {
-	err := uploadOneChunked(addr, token, sender, f, showProgress)
+func uploadFile(addr, token, sender, reqID string, f fileToSend, showProgress bool) error {
+	err := uploadOneChunked(addr, token, sender, reqID, f, showProgress)
 	if errors.Is(err, errOldReceiver) {
-		return uploadOne(addr, token, sender, f, showProgress)
+		return uploadOne(addr, token, sender, reqID, f, showProgress)
 	}
 	return err
 }
@@ -317,15 +369,20 @@ func uploadFile(addr, token, sender string, f fileToSend, showProgress bool) err
 // uploadOneChunked sends f as begin + parallel chunks + complete. The sender
 // keeps at most chunkConcurrent chunks in flight and retries each one
 // chunkAttempts times; a chunk that never lands fails the whole file.
-func uploadOneChunked(addr, token, sender string, f fileToSend, showProgress bool) error {
+func uploadOneChunked(addr, token, sender, reqID string, f fileToSend, showProgress bool) error {
 	src, err := os.Open(f.Src)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
 
-	resp, err := postJSON("http://"+addr+"/api/upload/begin", token,
-		map[string]any{"name": f.Rel, "size": f.Size, "sender": sender})
+	// Consent (v3): uploads must name the grant from /api/request.
+	var hdr map[string]string
+	if reqID != "" {
+		hdr = map[string]string{"X-Tailsend-Request": reqID}
+	}
+	resp, err := postJSONHeaders("http://"+addr+"/api/upload/begin", token,
+		map[string]any{"name": f.Rel, "size": f.Size, "sender": sender}, hdr)
 	if err != nil {
 		return fmt.Errorf("upload failed: %v", err)
 	}
@@ -482,6 +539,21 @@ func abortUpload(addr, token, id string) {
 
 // postJSON POSTs v as JSON with the shared-secret header, if one is set.
 func postJSON(url, token string, v any) (*http.Response, error) {
+	return postJSONVia(httpClient, url, token, v, nil)
+}
+
+// postJSONHeaders is postJSON with extra headers (e.g. X-Tailsend-Request).
+func postJSONHeaders(url, token string, v any, hdr map[string]string) (*http.Response, error) {
+	return postJSONVia(httpClient, url, token, v, hdr)
+}
+
+// postJSONClient is postJSONHeaders through a caller-supplied client (the
+// consent round trip needs its own, longer timeout).
+func postJSONClient(url, token string, v any, client *http.Client) (*http.Response, error) {
+	return postJSONVia(client, url, token, v, nil)
+}
+
+func postJSONVia(client *http.Client, url, token string, v any, hdr map[string]string) (*http.Response, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -494,12 +566,15 @@ func postJSON(url, token string, v any) (*http.Response, error) {
 	if token != "" {
 		req.Header.Set("X-Tailsend-Token", token)
 	}
-	return httpClient.Do(req)
+	for k, val := range hdr {
+		req.Header.Set(k, val)
+	}
+	return client.Do(req)
 }
 
 // uploadOne streams one file as a multipart POST. The body is produced by a
 // goroutine writing into an io.Pipe, so nothing is buffered in memory.
-func uploadOne(addr, token, sender string, f fileToSend, showProgress bool) error {
+func uploadOne(addr, token, sender, reqID string, f fileToSend, showProgress bool) error {
 	src, err := os.Open(f.Src)
 	if err != nil {
 		return err
@@ -535,6 +610,9 @@ func uploadOne(addr, token, sender string, f fileToSend, showProgress bool) erro
 	req.Header.Set("Content-Type", "multipart/form-data; boundary="+mw.Boundary())
 	if token != "" {
 		req.Header.Set("X-Tailsend-Token", token)
+	}
+	if reqID != "" {
+		req.Header.Set("X-Tailsend-Request", reqID)
 	}
 
 	resp, err := httpClient.Do(req)

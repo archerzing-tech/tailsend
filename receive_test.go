@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -30,7 +32,7 @@ func beginUpload(t *testing.T, s *uploadStore, dir string, name string, size int
 	t.Helper()
 	payload, _ := json.Marshal(map[string]any{"name": name, "size": size, "sender": "test"})
 	w, req := post(t, "/api/upload/begin", nil, payload)
-	s.handleBegin(w, req, dir, "", 0)
+	s.handleBegin(w, req, dir, "", 0, nil)
 	if w.Code != http.StatusOK {
 		t.Fatalf("begin %q: got HTTP %d: %s", name, w.Code, w.Body.String())
 	}
@@ -196,7 +198,7 @@ func TestBeginRejectsAbsurdDeclaredSize(t *testing.T) {
 	s := &uploadStore{uploads: map[string]*chunkUpload{}}
 	payload, _ := json.Marshal(map[string]any{"name": "big.bin", "size": 1 << 60, "sender": "test"})
 	w, req := post(t, "/api/upload/begin", nil, payload)
-	s.handleBegin(w, req, dir, "", 0)
+	s.handleBegin(w, req, dir, "", 0, nil)
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("1 EiB declaration: HTTP %d", w.Code)
 	}
@@ -239,5 +241,182 @@ func TestIsTempName(t *testing.T) {
 		if isTempName(n) {
 			t.Errorf("isTempName(%q) = true, want false", n)
 		}
+	}
+}
+
+// ---- consent (protocol v3) ----
+
+func sendRequest(t *testing.T, g *consentGate, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	w, req := post(t, "/api/request", nil, []byte(body))
+	g.handleRequest(w, req)
+	return w
+}
+
+func beginGated(t *testing.T, s *uploadStore, dir string, g *consentGate, name string, size int64, reqID string) *httptest.ResponseRecorder {
+	t.Helper()
+	payload, _ := json.Marshal(map[string]any{"name": name, "size": size, "sender": "t"})
+	var hdr map[string]string
+	if reqID != "" {
+		hdr = map[string]string{"X-Tailsend-Request": reqID}
+	}
+	w, req := post(t, "/api/upload/begin", hdr, payload)
+	s.handleBegin(w, req, dir, "", 0, g)
+	return w
+}
+
+func TestRequestAutoGrantWhenNotAsking(t *testing.T) {
+	g := newConsentGate(false, "")
+	w := sendRequest(t, g, `{"sender":"mac","count":1,"total":3,"files":[{"name":"a.bin","size":3}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("request: HTTP %d: %s", w.Code, w.Body.String())
+	}
+	var rr struct{ ID string }
+	json.Unmarshal(w.Body.Bytes(), &rr)
+	if rr.ID == "" {
+		t.Fatalf("no grant id in %s", w.Body.String())
+	}
+
+	// With ask off, begin works with or without the grant header — the
+	// compatibility path for senders that predate consent.
+	s := &uploadStore{uploads: map[string]*chunkUpload{}}
+	dir := t.TempDir()
+	if w := beginGated(t, s, dir, g, "a.bin", 3, ""); w.Code != http.StatusOK {
+		t.Fatalf("begin without header: HTTP %d: %s", w.Code, w.Body.String())
+	}
+	s2 := &uploadStore{uploads: map[string]*chunkUpload{}}
+	if w := beginGated(t, s2, dir, g, "a.bin", 3, rr.ID); w.Code != http.StatusOK {
+		t.Fatalf("begin with header: HTTP %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAskRequiresGrantForEveryUpload(t *testing.T) {
+	g := newConsentGate(true, "")
+	// Asking with nobody to answer → refused, reason "unattended".
+	w := sendRequest(t, g, `{"sender":"mac","count":1,"total":3,"files":[{"name":"a.bin","size":3}]}`)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("unattended request: HTTP %d: %s", w.Code, w.Body.String())
+	}
+
+	s := &uploadStore{uploads: map[string]*chunkUpload{}}
+	dir := t.TempDir()
+	// No grant anywhere → begin and v1 must refuse before bytes flow.
+	if w := beginGated(t, s, dir, g, "a.bin", 3, ""); w.Code != http.StatusForbidden {
+		t.Fatalf("begin without grant: HTTP %d", w.Code)
+	}
+
+	// An accepted request authorizes exactly its files.
+	g.addGrant("grant1", map[string]int64{"a.bin": 3})
+	if w := beginGated(t, s, dir, g, "a.bin", 3, "grant1"); w.Code != http.StatusOK {
+		t.Fatalf("begin with grant: HTTP %d: %s", w.Code, w.Body.String())
+	}
+	// Wrong id → refused.
+	if w := beginGated(t, s, dir, g, "a.bin", 3, "other"); w.Code != http.StatusForbidden {
+		t.Fatalf("begin with wrong id: HTTP %d", w.Code)
+	}
+	// Right id, wrong size → refused.
+	if w := beginGated(t, s, dir, g, "a.bin", 4, "grant1"); w.Code != http.StatusForbidden {
+		t.Fatalf("begin with wrong size: HTTP %d", w.Code)
+	}
+	// Right id, name outside the grant → refused.
+	if w := beginGated(t, s, dir, g, "b.bin", 3, "grant1"); w.Code != http.StatusForbidden {
+		t.Fatalf("begin with unlisted name: HTTP %d", w.Code)
+	}
+	// Expired grant → refused.
+	g.mu.Lock()
+	g.grants["grant1"].expires = time.Now().Add(-time.Second)
+	g.mu.Unlock()
+	if w := beginGated(t, s, dir, g, "a.bin", 3, "grant1"); w.Code != http.StatusForbidden {
+		t.Fatalf("begin with expired grant: HTTP %d", w.Code)
+	}
+	g.sweep()
+	g.mu.Lock()
+	_, alive := g.grants["grant1"]
+	g.mu.Unlock()
+	if alive {
+		t.Fatalf("sweep kept an expired grant")
+	}
+}
+
+func TestV1UploadRefusedWithoutGrant(t *testing.T) {
+	g := newConsentGate(true, "")
+	dir := t.TempDir()
+	send := func(reqID string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := &bytes.Buffer{}
+		mw := multipart.NewWriter(body)
+		mw.WriteField("sender", "mac")
+		fw, _ := mw.CreateFormFile("file", url.PathEscape("v1.bin"))
+		fw.Write([]byte("hello"))
+		mw.Close()
+		hdr := map[string]string{"Content-Type": mw.FormDataContentType()}
+		if reqID != "" {
+			hdr["X-Tailsend-Request"] = reqID
+		}
+		w, req := post(t, "/api/upload", hdr, body.Bytes())
+		handleUpload(w, req, dir, "", 0, g)
+		return w
+	}
+	if w := send(""); w.Code != http.StatusForbidden {
+		t.Fatalf("v1 without grant: HTTP %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "v1.bin")); !os.IsNotExist(err) {
+		t.Fatalf("v1 upload landed despite refusal")
+	}
+	g.addGrant("g", map[string]int64{"v1.bin": 5})
+	if w := send("g"); w.Code != http.StatusOK {
+		t.Fatalf("v1 with grant: HTTP %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestRequestDenyAcceptTimeout(t *testing.T) {
+	old := confirmWait
+	confirmWait = 80 * time.Millisecond
+	defer func() { confirmWait = old }()
+
+	// Explicit denial → 403 "denied".
+	deny := newConsentGate(true, "")
+	deny.prompt = func(sender string, count int, total int64, names []string) (bool, string) {
+		return false, "denied"
+	}
+	if w := sendRequest(t, deny, `{"sender":"mac","count":1,"total":3,"files":[{"name":"a.bin","size":3}]}`); w.Code != http.StatusForbidden {
+		t.Fatalf("denied: HTTP %d", w.Code)
+	}
+
+	// A prompt that stalls past confirmWait → 408 "timeout", and the handler
+	// answers before the prompt returns.
+	release := make(chan struct{})
+	slow := newConsentGate(true, "")
+	slow.prompt = func(sender string, count int, total int64, names []string) (bool, string) {
+		<-release
+		return false, "denied"
+	}
+	start := time.Now()
+	w := sendRequest(t, slow, `{"sender":"mac","count":1,"total":3,"files":[{"name":"a.bin","size":3}]}`)
+	if el := time.Since(start); el > 300*time.Millisecond {
+		t.Fatalf("timeout path waited %v for the prompt", el)
+	}
+	if w.Code != http.StatusRequestTimeout {
+		t.Fatalf("timeout: HTTP %d: %s", w.Code, w.Body.String())
+	}
+	close(release)
+
+	// Acceptance returns a grant the upload can use right away.
+	yes := newConsentGate(true, "")
+	yes.prompt = func(sender string, count int, total int64, names []string) (bool, string) {
+		if sender != "mac" || count != 1 || total != 3 || len(names) != 1 || names[0] != "a.bin" {
+			t.Fatalf("prompt got sender=%q count=%d total=%d names=%v", sender, count, total, names)
+		}
+		return true, ""
+	}
+	w = sendRequest(t, yes, `{"sender":"mac","count":1,"total":3,"files":[{"name":"a.bin","size":3}]}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("accept: HTTP %d: %s", w.Code, w.Body.String())
+	}
+	var rr struct{ ID string }
+	json.Unmarshal(w.Body.Bytes(), &rr)
+	s := &uploadStore{uploads: map[string]*chunkUpload{}}
+	if w := beginGated(t, s, t.TempDir(), yes, "a.bin", 3, rr.ID); w.Code != http.StatusOK {
+		t.Fatalf("begin after accept: HTTP %d: %s", w.Code, w.Body.String())
 	}
 }

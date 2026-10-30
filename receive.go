@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"bufio"
 	"flag"
 	"fmt"
 	"io"
@@ -33,7 +34,16 @@ func cmdReceive(args []string) {
 	bind := fs.String("bind", "", "address to bind (default: this machine's Tailscale IPv4)")
 	token := fs.String("token", "", "shared secret senders must pass via -token")
 	max := fs.Int64("max", 0, "reject single files larger than this many bytes (0 = unlimited)")
+	ask := fs.Bool("ask", false, "ask before accepting each transfer (default: accept automatically)")
 	fs.Parse(args)
+
+	// Consent gate (protocol v3): with -ask, incoming transfers wait for a
+	// human yes; without it, files are accepted automatically exactly as
+	// before, which is what unattended NAS receivers want.
+	gate := newConsentGate(*ask, *token)
+	if *ask && stdinIsTTY() {
+		gate.prompt = promptAllow
+	}
 
 	saveDir := *dir
 	if saveDir == "" {
@@ -82,13 +92,18 @@ func cmdReceive(args []string) {
 	if *token != "" {
 		authNote = "token required"
 	}
+	confirmNote := "off — files are accepted automatically"
+	if *ask {
+		confirmNote = "on — every transfer waits for confirmation"
+	}
 	fmt.Printf(`Tailsend receiver v%s
 
   this machine : %s
   saving to    : %s
   auth         : %s
+  confirm      : %s
   reachable at :
-`, version, host, saveDir, authNote)
+`, version, host, saveDir, authNote, confirmNote)
 	for _, ip := range advertise {
 		fmt.Printf("                 http://%s\n", net.JoinHostPort(ip, strconv.Itoa(*port)))
 	}
@@ -115,8 +130,9 @@ func cmdReceive(args []string) {
 		if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			peerIP = h
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": host, "version": version, "dir": saveDir, "your_ip": peerIP})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": host, "version": version, "dir": saveDir, "your_ip": peerIP, "confirm": gate.ask})
 	})
+	mux.HandleFunc("/api/request", gate.handleRequest)
 	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
 		if !authed(r, *token) {
 			writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "invalid or missing token"})
@@ -143,7 +159,7 @@ func cmdReceive(args []string) {
 		})
 	})
 	mux.HandleFunc("/api/upload", func(w http.ResponseWriter, r *http.Request) {
-		handleUpload(w, r, saveDir, *token, *max)
+		handleUpload(w, r, saveDir, *token, *max, gate)
 	})
 
 	// Chunked upload (v2): begin/chunk/complete/abort, for senders that
@@ -152,9 +168,9 @@ func cmdReceive(args []string) {
 	// Leftover spools from a crashed run: the registry is empty at boot, so
 	// nothing live can own one of these yet.
 	sweepSpoolFiles(saveDir)
-	go janitor(uploads)
+	go janitor(uploads, gate)
 	mux.HandleFunc("/api/upload/begin", func(w http.ResponseWriter, r *http.Request) {
-		uploads.handleBegin(w, r, saveDir, *token, *max)
+		uploads.handleBegin(w, r, saveDir, *token, *max, gate)
 	})
 	mux.HandleFunc("/api/upload/chunk", func(w http.ResponseWriter, r *http.Request) {
 		uploads.handleChunk(w, r, *token)
@@ -179,7 +195,198 @@ func cmdReceive(args []string) {
 	}
 }
 
-func handleUpload(w http.ResponseWriter, r *http.Request, saveDir, token string, max int64) {
+// ---- consent (protocol v3): bytes flow only after a yes ----
+
+const (
+	// grantTTL is how long an accepted request authorizes its files.
+	grantTTL = 10 * time.Minute
+	// maxRequestFiles caps one batch. The request carries every name so the
+	// begin check can be exact; beyond this the sender must split the batch.
+	maxRequestFiles = 5000
+)
+
+// confirmWait is how long a receiver holds an unanswered transfer request
+// open for a human to answer. A var so tests can shorten it.
+var confirmWait = 30 * time.Second
+
+// consentDeniedMsg goes to senders whose upload names no valid grant.
+const consentDeniedMsg = "receiver requires approval for transfers — update the sender or turn off confirmation there"
+
+type grant struct {
+	files   map[string]int64
+	expires time.Time
+}
+
+// consentGate decides which transfers may start. With ask off (the default for
+// headless receivers) everything is allowed exactly as before protocol v3;
+// with ask on, begin/upload must carry X-Tailsend-Request naming a grant
+// created by an accepted /api/request.
+type consentGate struct {
+	ask   bool
+	token string
+	// prompt asks a human and returns (accepted, reason). It must give up
+	// within confirmWait. nil means nobody can answer (unattended receiver).
+	prompt func(sender string, count int, total int64, names []string) (bool, string)
+
+	mu     sync.Mutex
+	grants map[string]*grant
+}
+
+func newConsentGate(ask bool, token string) *consentGate {
+	return &consentGate{ask: ask, token: token, grants: map[string]*grant{}}
+}
+
+func (g *consentGate) addGrant(id string, files map[string]int64) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.grants[id] = &grant{files: files, expires: time.Now().Add(grantTTL)}
+}
+
+// allows reports whether a transfer of name/size may start under reqID.
+// sizeKnown is false for v1 uploads, whose size arrives with the bytes.
+func (g *consentGate) allows(reqID, name string, size int64, sizeKnown bool) bool {
+	if g == nil || !g.ask {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	gr := g.grants[reqID]
+	if gr == nil || time.Now().After(gr.expires) {
+		return false
+	}
+	want, ok := gr.files[name]
+	return ok && (!sizeKnown || want == size)
+}
+
+func (g *consentGate) sweep() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	now := time.Now()
+	for id, gr := range g.grants {
+		if now.After(gr.expires) {
+			delete(g.grants, id)
+		}
+	}
+}
+
+// handleRequest answers POST /api/request with a grant id, or a refusal.
+func (g *consentGate) handleRequest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "POST only"})
+		return
+	}
+	if !authed(r, g.token) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "invalid or missing token"})
+		return
+	}
+	var req struct {
+		Sender string `json:"sender"`
+		Count  int    `json:"count"`
+		Total  int64  `json:"total"`
+		Files  []struct {
+			Name string `json:"name"`
+			Size int64  `json:"size"`
+		} `json:"files"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad JSON body"})
+		return
+	}
+	if len(req.Files) == 0 || len(req.Files) > maxRequestFiles {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": fmt.Sprintf("batch must carry 1..%d files", maxRequestFiles)})
+		return
+	}
+	files := make(map[string]int64, len(req.Files))
+	names := make([]string, 0, len(req.Files))
+	for _, f := range req.Files {
+		files[f.Name] = f.Size
+		names = append(names, f.Name)
+	}
+
+	var accept bool
+	var reason string
+	switch {
+	case !g.ask: // unattended default: accept automatically, as before v3
+		accept = true
+	case g.prompt != nil:
+		// The gate owns the deadline: a prompt that never answers (a GUI
+		// gone, a user walking away) must not hold the request forever.
+		type decision struct {
+			accept bool
+			reason string
+		}
+		ch := make(chan decision, 1)
+		go func() {
+			a, rsn := g.prompt(orUnknown(req.Sender), req.Count, req.Total, names)
+			ch <- decision{a, rsn}
+		}()
+		select {
+		case d := <-ch:
+			accept, reason = d.accept, d.reason
+		case <-time.After(confirmWait):
+			accept, reason = false, "timeout"
+		}
+	default: // asking, but nobody can answer
+		accept, reason = false, "unattended"
+	}
+	if !accept {
+		code := http.StatusForbidden
+		if reason == "timeout" {
+			code = http.StatusRequestTimeout
+		}
+		writeJSON(w, code, map[string]any{"ok": false, "error": "transfer not accepted", "reason": reason})
+		return
+	}
+	id := randomHex(8)
+	g.addGrant(id, files)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// promptAllow asks at the TTY whether to accept a transfer, giving up after
+// confirmWait. An answer typed after the timeout still lands in stdin; the
+// next prompt may consume it — acceptable for a line-oriented CLI.
+func promptAllow(sender string, count int, total int64, names []string) (bool, string) {
+	if !stdinIsTTY() {
+		return false, "unattended"
+	}
+	list := names
+	if len(list) > 5 {
+		list = list[:5]
+	}
+	fmt.Printf("\nIncoming transfer from %s: %d %s (%s)\n", sender, count, plural("file", count), human(total))
+	for _, n := range list {
+		fmt.Printf("  · %s\n", n)
+	}
+	if len(names) > 5 {
+		fmt.Printf("  … and %d more\n", count-len(list))
+	}
+	fmt.Printf("Accept? [y/N] (%ds to answer, then declined) ", int(confirmWait.Seconds()))
+	answers := make(chan string, 1)
+	go func() {
+		sc := bufio.NewScanner(os.Stdin)
+		if sc.Scan() {
+			answers <- strings.TrimSpace(strings.ToLower(sc.Text()))
+		} else {
+			answers <- "" // EOF: stdin closed — nobody is answering
+		}
+	}()
+	select {
+	case line := <-answers:
+		fmt.Println()
+		if line == "" {
+			return false, "unattended"
+		}
+		if line == "y" || line == "yes" {
+			return true, ""
+		}
+		return false, "denied"
+	case <-time.After(confirmWait):
+		fmt.Println("- timed out, declined")
+		return false, "timeout"
+	}
+}
+
+func handleUpload(w http.ResponseWriter, r *http.Request, saveDir, token string, max int64, gate *consentGate) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "POST only"})
 		return
@@ -213,6 +420,13 @@ func handleUpload(w http.ResponseWriter, r *http.Request, saveDir, token string,
 			rel, uerr := url.PathUnescape(part.FileName())
 			if uerr != nil || rel == "" {
 				rel = part.FileName()
+			}
+			// Consent (v3): check before any byte is read from the part.
+			// v1 carries no size, so the grant is matched on name alone.
+			if !gate.allows(r.Header.Get("X-Tailsend-Request"), rel, 0, false) {
+				writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": consentDeniedMsg})
+				part.Close()
+				return
 			}
 			dest, err := safeJoin(saveDir, rel)
 			if err != nil {
@@ -311,7 +525,7 @@ const maxDeclaredSize = 1 << 50 // 1 PiB
 
 // handleBegin validates a v2 upload request, opens its spool file and hands
 // back the id the sender quotes on every later call.
-func (s *uploadStore) handleBegin(w http.ResponseWriter, r *http.Request, saveDir, token string, max int64) {
+func (s *uploadStore) handleBegin(w http.ResponseWriter, r *http.Request, saveDir, token string, max int64, gate *consentGate) {
 	if r.Method != http.MethodPost {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "POST only"})
 		return
@@ -339,6 +553,11 @@ func (s *uploadStore) handleBegin(w http.ResponseWriter, r *http.Request, saveDi
 	}
 	if req.Size > maxDeclaredSize {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "declared size is unreasonably large"})
+		return
+	}
+	// Consent (v3): the header must name a grant that covers name+size.
+	if !gate.allows(r.Header.Get("X-Tailsend-Request"), req.Name, req.Size, true) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": consentDeniedMsg})
 		return
 	}
 	dest, err := safeJoin(saveDir, req.Name) // same cleaning as the v1 upload
@@ -707,9 +926,10 @@ const uploadIdle = time.Hour
 
 // janitor reaps uploads whose sender went quiet — without it a crashed sender
 // would leave its spool file and registry entry behind forever.
-func janitor(s *uploadStore) {
+func janitor(s *uploadStore, gate *consentGate) {
 	t := time.NewTicker(10 * time.Minute)
 	for range t.C {
+		gate.sweep()
 		for _, up := range s.stale() {
 			up.mu.Lock()
 			up.f.Close()
