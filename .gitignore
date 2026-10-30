@@ -1,0 +1,17 @@
+# Go CLI build output
+/tailsend
+
+# Node
+node_modules/
+
+# Rust / Tauri build artifacts
+app/src-tauri/target/
+
+# Generated mobile projects — CI regenerates with `tauri android init`
+app/src-tauri/gen/
+
+# Local-only cargo mirror override (rsproxy for CN network); CI uses crates.io
+app/src-tauri/.cargo/config.toml
+
+# OS noise
+.DS_Store

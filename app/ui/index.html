@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Tailsend</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 1024 1024" aria-hidden="true">
+        <defs>
+          <linearGradient id="lg" gradientUnits="userSpaceOnUse" x1="330" y1="320" x2="780" y2="720">
+            <stop offset="0" stop-color="#4ed0ff" />
+            <stop offset="1" stop-color="#2e5bf0" />
+          </linearGradient>
+        </defs>
+        <rect x="100" y="100" width="824" height="824" rx="185" fill="#ffffff" />
+        <g transform="translate(-64, 35)">
+          <path d="M 445 505 L 302 632 L 462 672 Z" fill="#2450c8" />
+          <path d="M 748 455 C 735 372 668 315 590 318 C 505 322 448 385 438 470 C 434 508 428 546 412 580 C 405 595 396 609 388 620 C 410 656 472 690 548 690 C 650 688 722 620 748 535 C 756 508 752 480 748 455 Z" fill="url(#lg)" />
+          <path d="M 470 522 C 496 450 586 438 639 488 C 601 568 521 598 471 568 C 459 550 461 536 470 522 Z" fill="#1c3fae" opacity=".92" />
+          <path d="M 745 398 L 838 442 L 745 488 Z" fill="#ffb13d" stroke="#ffb13d" stroke-width="26" stroke-linejoin="round" />
+          <circle cx="652" cy="392" r="40" fill="#ffffff" />
+          <circle cx="663" cy="397" r="19" fill="#101a2c" />
+          <path d="M 562 318 Q 576 274 620 264 Q 600 298 596 330 Q 576 327 562 318 Z" fill="#2450c8" />
+        </g>
+      </svg>
+      <span class="name">Tailsend</span>
+      <span class="ver" id="ver"></span>
+    </div>
+    <div class="statusbar">
+      <span class="seg" id="chip-self">本机：读取中…</span>
+      <i class="sep" aria-hidden="true"></i>
+      <span class="seg" id="chip-recv"><i class="dot"></i>接收端检测中…</span>
+      <i class="sep" aria-hidden="true"></i>
+      <span class="seg" id="chip-dir" hidden></span>
+    </div>
+  </header>
+
+  <main>
+    <div class="banner" id="banner" hidden></div>
+
+    <div class="grid">
+      <section class="card peers-card">
+        <div class="card-head">
+          <h2>节点 <span class="count" id="peers-count"></span></h2>
+          <button class="ghost" id="btn-peers-refresh">刷新</button>
+        </div>
+        <div class="peers" id="peers">
+          <div class="empty">正在读取节点…</div>
+        </div>
+        <p class="selfip" id="selfip" hidden></p>
+        <div class="manual">
+          <input id="manual" type="text" spellcheck="false"
+                 placeholder="或输入对方 IP / 主机名 / IP:端口" />
+          <button class="ghost" id="btn-manual">使用</button>
+        </div>
+      </section>
+
+      <div class="col">
+        <section class="card">
+          <div class="card-head">
+            <h2>发送</h2>
+            <span class="target" id="target-label">未选择目标</span>
+          </div>
+          <div class="linkstrip" id="linkstrip" aria-hidden="true">
+            <span class="node self"><i class="ndot"></i>本机</span>
+            <span class="rail"><i class="packet p1"></i><i class="packet p2"></i><i class="packet p3"></i></span>
+            <span class="node target" id="strip-target">选择目标</span>
+          </div>
+          <div class="drop" id="drop">
+            <svg class="drop-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 15V4m0 0l-4 4m4-4l4 4" />
+              <path d="M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" />
+            </svg>
+            <p class="drop-title">把文件或文件夹拖到这里</p>
+            <p class="drop-hint">或</p>
+            <div class="drop-btns">
+              <button class="primary" id="btn-pick">打开文件选择器</button>
+              <button class="ghost" id="btn-pickdir">选择文件夹</button>
+              <button class="ghost" id="btn-inputfile">选择文件（界面）</button>
+            </div>
+            <input type="file" id="file-in" multiple hidden />
+            <input type="file" id="dir-in" webkitdirectory multiple hidden />
+          </div>
+          <ul class="queue" id="queue"></ul>
+          <div class="sendbar">
+            <div class="overall">
+              <div class="obar"><i id="ofill"></i></div>
+              <span class="otext" id="otext"></span>
+            </div>
+            <button class="primary send" id="btn-send" disabled>发送</button>
+          </div>
+        </section>
+
+        <section class="card inbox-card">
+          <div class="card-head">
+            <h2>收件箱 <span class="count" id="inbox-count"></span></h2>
+            <button class="ghost" id="btn-open">打开文件夹</button>
+          </div>
+          <ul class="inbox" id="inbox"></ul>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <div class="toasts" id="toasts"></div>
+  <script src="app.js"></script>
+</body>
+</html>
