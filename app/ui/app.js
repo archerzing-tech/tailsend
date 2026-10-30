@@ -10,8 +10,8 @@ const CHUNK = 1024 * 1024;
 const $ = (id) => document.getElementById(id);
 
 let peers = [];
-let target = null; // { label, addr } — addr is what we dial (IP when from the list)
-let selKey = null; // selected peer identity "ip|name"; names alone can collide
+let targets = []; // [{ key, label, addr }] — a send fans out to every entry (1:N)
+let multiSel = false; // multi-select mode: click adds/removes; off: click switches the lone target
 let items = [];
 let itemSeq = 0;
 let sending = false;
@@ -136,6 +136,8 @@ function removeTarget(addr) {
 // "1.2.3.4:4782" -> "1.2.3.4" (tailnet addresses are IPv4)
 const hostOf = (a) => (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(a) ? a.slice(0, a.indexOf(":")) : a);
 
+const peerKey = (p) => p.ip + "|" + p.name; // names alone can collide
+
 // True when a Tailsend receiver answers at addr (short, token-authed ping).
 async function probeAddr(addr) {
   try {
@@ -245,11 +247,13 @@ async function loadPeers() {
       prevOnline.set(k, up);
     });
     peers.sort((a, b) => rank(a) - rank(b));
-    // Drop a stale selection if its peer vanished from the tailnet.
-    if (selKey && !peers.some((p) => p.ip + "|" + p.name === selKey)) {
-      selKey = null;
-      target = null;
-      updateTargetUI();
+    // Drop selections whose peer vanished from the tailnet (manual ones stay).
+    if (targets.length) {
+      const alive = targets.filter((t) => peers.some((p) => peerKey(p) === t.key));
+      if (alive.length !== targets.length) {
+        targets = alive;
+        updateTargetUI();
+      }
     }
     renderPeers();
   } catch (e) {
@@ -278,7 +282,7 @@ function renderPeers() {
     : p.recv === false && p.online ? " · 在线，但对方 Tailsend 未在运行"
     : p.online ? " · 在线" : " · 离线";
   el.innerHTML = peers.map((p, i) => {
-    const sel = selKey !== null && p.ip + "|" + p.name === selKey;
+    const sel = targets.some((t) => t.key === peerKey(p));
     return `
     <div class="peer ${ledClass(p)} ${sel ? "sel" : ""} ${p.fresh ? "fresh" : ""}" data-i="${i}" title="${esc(p.fqdn || p.name)}${hint(p)}">
       <i class="led" aria-hidden="true"></i>
@@ -291,7 +295,7 @@ function renderPeers() {
     </div>`;
   }).join("");
   el.querySelectorAll(".peer").forEach((n) => {
-    n.onclick = () => selectPeer(+n.dataset.i);
+    n.onclick = () => choosePeer(+n.dataset.i);
   });
   el.querySelectorAll(".fx-del").forEach((b) => {
     b.onclick = (e) => {
@@ -300,13 +304,23 @@ function renderPeers() {
       loadPeers();
     };
   });
+  syncTargetbar();
 }
 
-function selectPeer(i) {
+function choosePeer(i) {
   const p = peers[i];
   if (!p) return;
-  selKey = p.ip + "|" + p.name;
-  target = { label: p.name, addr: p.ip || p.name };
+  const key = peerKey(p);
+  const hit = targets.find((t) => t.key === key);
+  if (multiSel) {
+    // 多选：点击把节点加入/移出目标集合
+    targets = hit ? targets.filter((t) => t !== hit)
+      : [...targets, { key, label: p.name, addr: p.ip || p.name }];
+  } else if (hit && targets.length === 1) {
+    targets = []; // 再点一次已选节点 = 取消
+  } else {
+    targets = [{ key, label: p.name, addr: p.ip || p.name }];
+  }
   $("manual").value = "";
   renderPeers();
   updateTargetUI();
@@ -315,23 +329,83 @@ function selectPeer(i) {
 function setManualTarget() {
   const v = $("manual").value.trim();
   if (!v) { toast("请输入对方的 IP 或主机名", "err"); return; }
-  selKey = null;
-  target = { label: v, addr: v };
+  const hit = targets.find((t) => t.addr === v);
+  if (multiSel) {
+    targets = hit ? targets.filter((t) => t !== hit)
+      : [...targets, { key: "m|" + v, label: v, addr: v }];
+  } else if (hit && targets.length === 1) {
+    targets = [];
+  } else {
+    targets = [{ key: "m|" + v, label: v, addr: v }];
+  }
   saveTarget(v, v);
   renderPeers();
   updateTargetUI();
 }
 
+const targetNames = () => targets.map((t) => t.label).join("、");
+
 function updateTargetUI() {
-  $("target-label").textContent = target ? "→ " + target.label : "未选择目标";
+  const n = targets.length;
+  $("target-label").textContent = !n ? "未选择目标"
+    : n === 1 ? "→ " + targets[0].label : `→ ${n} 个目标`;
   const st = $("strip-target");
-  st.textContent = target ? target.label : "选择目标";
-  st.classList.toggle("set", !!target);
+  st.textContent = !n ? "选择目标" : n === 1 ? targets[0].label : `${targets[0].label} +${n - 1}`;
+  st.classList.toggle("set", n > 0);
+  const done = $("btn-sheet-done");
+  if (done) done.textContent = n > 1 ? `选好了（${n} 个目标）` : "选好了";
+  syncTargetbar();
   updateSendBtn();
 }
 
 function updateSendBtn() {
-  $("btn-send").disabled = sending || !target || !items.some((i) => i.status === "ready");
+  $("btn-send").disabled = sending || !targets.length || !items.some((i) => i.status === "ready");
+}
+
+/* ------------------------------------------------- mobile target sheet */
+
+function sheetIsOpen() {
+  return document.body.classList.contains("sheet-open");
+}
+
+function openPeerSheet() {
+  const bar = $("targetbar");
+  const sheet = $("peers-card");
+  if (!bar || !sheet) return;
+  const top = Math.min(bar.getBoundingClientRect().bottom + 8, window.innerHeight - 160);
+  sheet.style.top = top + "px";
+  sheet.style.maxHeight = window.innerHeight - top - 12 + "px";
+  document.body.classList.add("sheet-open");
+  bar.classList.add("open");
+  bar.setAttribute("aria-expanded", "true");
+}
+
+function closePeerSheet() {
+  document.body.classList.remove("sheet-open");
+  const bar = $("targetbar");
+  if (bar) {
+    bar.classList.remove("open");
+    bar.setAttribute("aria-expanded", "false");
+  }
+}
+
+// Target bar mirrors the selection: name/count, dial addr, and the best LED
+// across selected peers (green beats amber beats gray).
+function syncTargetbar() {
+  const bar = $("targetbar");
+  if (!bar) return;
+  const selPeers = peers.filter((p) => targets.some((t) => t.key === peerKey(p)));
+  bar.classList.toggle("has", targets.length > 0);
+  bar.classList.remove("g", "y", "x");
+  bar.classList.add(
+    !targets.length ? "x"
+      : selPeers.some((p) => p.recv === true) ? "g"
+      : selPeers.some((p) => p.online) ? "y" : "x"
+  );
+  $("tb-name").textContent = !targets.length ? "选择发送目标"
+    : targets.length === 1 ? targets[0].label : `${targets.length} 个目标`;
+  $("tb-sub").textContent = !targets.length ? "点这里选节点（可多选），或输入对方 IP"
+    : targets.length === 1 ? targets[0].addr : targetNames();
 }
 
 /* ---------------------------------------------------------------- queue */
@@ -435,8 +509,8 @@ function b64(buf) {
   return btoa(s);
 }
 
-async function sendData(item) {
-  const { id } = await invoke("send_data_begin", { target: target.addr, name: item.rel, size: item.size });
+async function sendData(item, addr) {
+  const { id } = await invoke("send_data_begin", { target: addr, name: item.rel, size: item.size });
   pendingBatch.set("d:" + id, { item, res: () => {}, rej: () => {} });
   try {
     for (let off = 0; off < item.size; off += CHUNK) {
@@ -453,50 +527,64 @@ async function sendData(item) {
 
 async function send() {
   const ready = items.filter((i) => i.status === "ready");
-  if (!target) { toast("先在左侧选择目标节点，或输入对方 IP", "err"); return; }
+  if (!targets.length) { toast("先选择目标节点（可多选），或输入对方 IP", "err"); return; }
   if (!ready.length) { toast("没有要发送的文件", "err"); return; }
   sending = true;
   document.body.classList.add("sending");
   updateSendBtn();
+  ready.forEach((i) => { i.tried = 0; i.okN = 0; i.error = null; });
 
+  // 1:N — every file goes to every target, one target at a time so progress
+  // stays readable and a dead target can't garble the others' results.
+  const perTarget = targets.map((t) => ({ t, ok: 0, fail: 0 }));
+  const totalBytes = ready.reduce((s, i) => s + i.size, 0) * targets.length;
   let doneBytes = 0;
-  const totalBytes = ready.reduce((s, i) => s + i.size, 0);
   const t0 = Date.now();
   let okc = 0, failc = 0;
 
-  for (const item of ready) {
-    item.status = "sending";
-    item.loaded = 0;
-    renderQueue();
-    try {
-      if (item.mode === "path") {
-        const batch = await invoke("send_files", {
-          target: target.addr,
-          entries: [{ path: item.path, rel: item.rel, size: item.size }],
-        });
-        await new Promise((res, rej) => pendingBatch.set("p:" + batch, { item, res, rej }));
-      } else {
-        await sendData(item);
+  for (const pt of perTarget) {
+    for (const item of ready) {
+      item.status = "sending";
+      item.loaded = 0;
+      renderQueue();
+      try {
+        if (item.mode === "path") {
+          const batch = await invoke("send_files", {
+            target: pt.t.addr,
+            entries: [{ path: item.path, rel: item.rel, size: item.size }],
+          });
+          await new Promise((res, rej) => pendingBatch.set("p:" + batch, { item, res, rej }));
+        } else {
+          await sendData(item, pt.t.addr);
+        }
+        pt.ok++; okc++; item.okN++;
+      } catch (err) {
+        pt.fail++; failc++;
+        toast(`「${item.rel}」→ ${pt.t.label} 发送失败：${String((err && err.message) || err)}`, "err");
       }
-      item.status = "done";
-      item.loaded = item.size;
-      okc++;
-    } catch (err) {
-      item.status = "error";
-      item.error = String((err && err.message) || err);
-      failc++;
-      toast(`「${item.rel}」发送失败：${item.error}`, "err");
+      doneBytes += item.size;
+      item.tried++;
+      if (item.tried >= targets.length) {
+        item.status = item.okN === item.tried ? "done" : "error";
+        if (item.status === "error") item.error = "部分目标接收失败，详见上方提示";
+        item.loaded = item.okN ? item.size : 0;
+      }
+      renderQueue();
+      updateOverall(doneBytes, totalBytes, t0);
     }
-    doneBytes += item.size;
-    renderQueue();
-    updateOverall(doneBytes, totalBytes, t0);
   }
 
   sending = false;
   document.body.classList.remove("sending");
   updateSendBtn();
-  if (okc > 0) saveTarget(target.addr, target.label); // remember where sends succeed
-  toast(`发送完成：${okc}/${okc + failc} 个文件`, failc ? "err" : "ok");
+  perTarget.forEach((x) => { if (x.ok > 0) saveTarget(x.t.addr, x.t.label); }); // remember where sends succeed
+  const bad = perTarget.filter((x) => x.fail > 0).map((x) => x.t.label);
+  toast(
+    failc
+      ? `发送完成：${okc} 成功 / ${failc} 失败${bad.length ? `（${bad.join("、")}）` : ""}`
+      : `已发送 ${okc} 个文件给 ${targets.length} 个目标`,
+    failc ? "err" : "ok"
+  );
   loadInbox();
 }
 
@@ -526,9 +614,22 @@ async function loadInbox() {
 
 function wire() {
   $("btn-peers-refresh").onclick = loadPeers;
+  $("btn-multi").onclick = () => {
+    multiSel = !multiSel;
+    $("btn-multi").classList.toggle("on", multiSel);
+    $("btn-multi").setAttribute("aria-pressed", String(multiSel));
+    toast(multiSel ? "多选已开：点节点加入/移出目标" : "多选已关：点节点直接切换目标");
+  };
   $("btn-manual").onclick = setManualTarget;
   $("manual").addEventListener("keydown", (e) => { if (e.key === "Enter") setManualTarget(); });
   $("btn-send").onclick = send;
+
+  // Mobile: the node panel lives in a sheet dropped from the target bar.
+  $("targetbar").onclick = () => (sheetIsOpen() ? closePeerSheet() : openPeerSheet());
+  $("sheet-backdrop").onclick = closePeerSheet;
+  $("btn-sheet-done").onclick = closePeerSheet;
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && sheetIsOpen()) closePeerSheet(); });
+  window.addEventListener("resize", () => { if (sheetIsOpen()) openPeerSheet(); });
   $("btn-open").onclick = async () => {
     try { await invoke("open_inbox"); } catch (e) { toast(String(e), "err"); }
   };

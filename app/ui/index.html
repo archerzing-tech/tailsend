@@ -43,10 +43,13 @@
     <div class="banner" id="banner" hidden></div>
 
     <div class="grid">
-      <section class="card peers-card">
+      <section class="card peers-card" id="peers-card">
         <div class="card-head">
           <h2>节点 <span class="count" id="peers-count"></span></h2>
-          <button class="ghost" id="btn-peers-refresh">刷新</button>
+          <span class="head-btns">
+            <button class="ghost" id="btn-multi" aria-pressed="false">多选</button>
+            <button class="ghost" id="btn-peers-refresh">刷新</button>
+          </span>
         </div>
         <div class="peers" id="peers">
           <div class="empty">正在读取节点…</div>
@@ -57,6 +60,7 @@
                  placeholder="或输入对方 IP / 主机名 / IP:端口" />
           <button class="ghost" id="btn-manual">使用</button>
         </div>
+        <div class="sheet-done"><button class="primary" id="btn-sheet-done">选好了</button></div>
       </section>
 
       <div class="col">
@@ -65,6 +69,14 @@
             <h2>发送</h2>
             <span class="target" id="target-label">未选择目标</span>
           </div>
+          <button class="targetbar" id="targetbar" aria-expanded="false" aria-controls="peers-card">
+            <i class="led" id="tb-led" aria-hidden="true"></i>
+            <span class="tb-meta">
+              <span class="tb-name" id="tb-name">选择发送目标</span>
+              <span class="tb-sub mono" id="tb-sub">点这里选节点，或输入对方 IP</span>
+            </span>
+            <svg class="tb-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
           <div class="linkstrip" id="linkstrip" aria-hidden="true">
             <span class="node self"><i class="ndot"></i>本机</span>
             <span class="rail"><i class="packet p1"></i><i class="packet p2"></i><i class="packet p3"></i></span>
@@ -106,6 +118,7 @@
     </div>
   </main>
 
+  <div class="sheet-backdrop" id="sheet-backdrop" aria-hidden="true"></div>
   <div class="toasts" id="toasts"></div>
   <script src="app.js"></script>
 </body>

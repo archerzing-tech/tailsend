@@ -645,12 +645,25 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
 .toast.ok { border-left-color: var(--ok); }
 .toast.err { border-left-color: var(--err); }
 
+/* ------------------------------------------------- target sheet (mobile) */
+
+/* The node panel becomes a dropdown sheet on phones; the target bar is the
+   handle that drops it. On desktop everything here stays out of the way. */
+.targetbar, .sheet-backdrop, .sheet-done { display: none; }
+
+.head-btns { display: inline-flex; gap: 6px; }
+
+button.ghost.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 /* ---------------------------------------------------------------- mobile */
 
 @media (max-width: 760px) {
   .top, main { padding-left: 14px; padding-right: 14px; }
   .grid { grid-template-columns: 1fr; }
-  .peers { max-height: 320px; }
   .statusbar { width: 100%; justify-content: space-between; flex-wrap: wrap; row-gap: 2px; }
   .seg { max-width: 100%; min-width: 0; }
   .drop { padding: 24px 12px 20px; }
@@ -661,4 +674,116 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
      16px so iOS Safari doesn't zoom the page on focus. */
   .peer .fx-del { opacity: 1; }
   .manual input { font-size: 16px; }
+
+  /* Send and inbox own the page; the node list collapses into a sheet that
+     drops from the target bar — one tap away, not a permanent panel. */
+  .card-head .target { display: none; }
+  .peers-card { display: none; }
+
+  .targetbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    min-height: 0;
+    margin-bottom: 12px;
+    padding: 10px 14px;
+    text-align: left;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .targetbar:active { background: var(--accent-soft); }
+  .targetbar.open { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .targetbar .led {
+    flex: none;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--border);
+  }
+  .targetbar.g .led {
+    background: var(--ok);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent);
+  }
+  .targetbar.y .led {
+    background: var(--warn);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 16%, transparent);
+  }
+  .targetbar .tb-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .targetbar .tb-name {
+    font-weight: 650;
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .targetbar:not(.has) .tb-name { color: var(--muted); font-weight: 500; }
+  .targetbar .tb-sub {
+    color: var(--muted);
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .targetbar .tb-chev {
+    flex: none;
+    width: 17px;
+    height: 17px;
+    stroke: var(--muted);
+    fill: none;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    transition: transform 0.15s ease;
+  }
+  .targetbar.open .tb-chev { transform: rotate(180deg); }
+
+  body.sheet-open { overflow: hidden; }
+
+  .sheet-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    background: color-mix(in srgb, var(--text) 32%, transparent);
+  }
+  body.sheet-open .sheet-backdrop { display: block; animation: fade 0.15s ease; }
+
+  body.sheet-open .peers-card {
+    display: block;
+    position: fixed;
+    left: 12px;
+    right: 12px;
+    z-index: 40;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    box-shadow: var(--shadow-pop);
+    animation: sheet-in 0.18s ease;
+  }
+
+  .peers { max-height: none; }
+
+  .sheet-done {
+    display: flex;
+    position: sticky;
+    bottom: -18px; /* cancel the card's bottom padding */
+    margin: 14px -20px -18px;
+    padding: 12px 20px calc(12px + env(safe-area-inset-bottom));
+    background: var(--panel);
+    border-top: 1px solid var(--border-soft);
+  }
+  .sheet-done .primary { width: 100%; }
+}
+
+@keyframes sheet-in {
+  from { opacity: 0; transform: translateY(-8px); }
+}
+
+@keyframes fade {
+  from { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .peers-card, .sheet-backdrop { animation: none; }
+  .targetbar .tb-chev { transition: none; }
 }
