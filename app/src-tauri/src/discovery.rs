@@ -47,7 +47,11 @@ struct TsPeer {
 
 // The App Store build of Tailscale on macOS doesn't put the CLI on PATH.
 fn cli_bin() -> String {
-    let exe = if cfg!(windows) { "tailscale.exe" } else { "tailscale" };
+    let exe = if cfg!(windows) {
+        "tailscale.exe"
+    } else {
+        "tailscale"
+    };
     if let Some(paths) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&paths) {
             let cand = dir.join(exe);
@@ -92,14 +96,24 @@ pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
     let self_info = st
         .self_
         .and_then(|p| node_from(&p, true))
-        .map(|n| SelfInfo { name: n.name, ip: n.ip });
+        .map(|n| SelfInfo {
+            name: n.name,
+            ip: n.ip,
+        });
 
     let self_info = match self_info {
         Some(s) if !s.name.is_empty() => s,
-        _ => SelfInfo { name: crate::netcore::host_name(), ip: String::new() },
+        _ => SelfInfo {
+            name: crate::netcore::host_name(),
+            ip: String::new(),
+        },
     };
 
-    let mut peers: Vec<Peer> = st.peers.values().filter_map(|p| node_from(p, false)).collect();
+    let mut peers: Vec<Peer> = st
+        .peers
+        .values()
+        .filter_map(|p| node_from(p, false))
+        .collect();
     peers.sort_by(|a, b| match (a.online, b.online) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
@@ -121,12 +135,21 @@ fn node_from(p: &TsPeer, self_: bool) -> Option<Peer> {
     };
     let ip = primary_of(&p.tailscale_ips).unwrap_or_default();
     let _ = self_;
-    Some(Peer { name, fqdn, ip, online: p.online, os: p.os.clone() })
+    Some(Peer {
+        name,
+        fqdn,
+        ip,
+        online: p.online,
+        os: p.os.clone(),
+    })
 }
 
 // Prefer the IPv4 tailnet address.
 pub fn primary_of(ips: &[String]) -> Option<String> {
-    ips.iter().find(|ip| !ip.contains(':')).cloned().or_else(|| ips.first().cloned())
+    ips.iter()
+        .find(|ip| !ip.contains(':'))
+        .cloned()
+        .or_else(|| ips.first().cloned())
 }
 
 pub async fn primary_ip() -> Result<String, String> {
@@ -184,10 +207,15 @@ pub async fn find_target(target: &str, default_port: u16) -> Result<(String, u16
         .collect();
     match hits.len() {
         1 => Ok((hits[0].ip.clone(), default_port)),
-        0 => Err(format!("没有匹配 “{t}” 的节点——查看节点列表，或直接输入对方 IP")),
+        0 => Err(format!(
+            "没有匹配 “{t}” 的节点——查看节点列表，或直接输入对方 IP"
+        )),
         _ => Err(format!(
             "“{t}” 有多个匹配：{}",
-            hits.iter().map(|h| h.name.clone()).collect::<Vec<_>>().join("、")
+            hits.iter()
+                .map(|h| h.name.clone())
+                .collect::<Vec<_>>()
+                .join("、")
         )),
     }
 }

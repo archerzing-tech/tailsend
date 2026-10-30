@@ -19,7 +19,9 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<serde_json:
 #[tauri::command]
 pub async fn list_peers() -> serde_json::Value {
     match discovery::status().await {
-        Ok((self_info, peers)) => serde_json::json!({ "self": self_info, "peers": peers, "error": serde_json::Value::Null }),
+        Ok((self_info, peers)) => {
+            serde_json::json!({ "self": self_info, "peers": peers, "error": serde_json::Value::Null })
+        }
         Err(e) => serde_json::json!({ "self": serde_json::Value::Null, "peers": [], "error": e }),
     }
 }
@@ -44,7 +46,12 @@ pub async fn ping_peer(
     let addr = format!("{ip}:{port}");
     let token = state.recv.lock().unwrap().token.clone();
     let p = netcore::ping(&addr, &token).await?;
-    Ok(PeerPing { online: true, name: p.name, version: p.version, your_ip: p.your_ip })
+    Ok(PeerPing {
+        online: true,
+        name: p.name,
+        version: p.version,
+        your_ip: p.your_ip,
+    })
 }
 
 /// Mobile node discovery: ask reachable receivers (favorites, usually a NAS)
@@ -90,22 +97,63 @@ pub async fn discover_peers(
     peers.sort_by(|a, b| {
         let on = |v: &serde_json::Value| v["online"].as_bool().unwrap_or(false);
         on(b).cmp(&on(a)).then_with(|| {
-            a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+            a["name"]
+                .as_str()
+                .unwrap_or("")
+                .to_lowercase()
+                .cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
         })
     });
     Ok(json!({ "self_ip": own_ip, "peers": peers }))
 }
 
 #[tauri::command]
-pub async fn restart_receiver(state: tauri::State<'_, AppState>) -> Result<(), String> {
+pub async fn restart_receiver(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
     crate::state::stop_receiver(&state);
-    crate::state::start_receiver(&state).await
+    crate::state::start_receiver(&app, &state).await
+}
+
+// Toggle the confirmation gate and rebind so it takes effect at once.
+#[tauri::command]
+pub async fn set_confirm(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    confirm: bool,
+) -> Result<(), String> {
+    {
+        let mut rs = state.recv.lock().unwrap();
+        if rs.confirm == confirm {
+            return Ok(());
+        }
+        rs.confirm = confirm;
+    }
+    crate::state::stop_receiver(&state);
+    crate::state::start_receiver(&app, &state).await
+}
+
+// The webview's answer to an /api/request surfaced as `incoming-request`.
+// An unknown id (already answered, or the request timed out) is an error.
+#[tauri::command]
+pub async fn request_respond(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    accept: bool,
+) -> Result<(), String> {
+    let tx = state.pending.lock().unwrap().remove(&id);
+    match tx {
+        Some(tx) => tx.send(accept).map_err(|_| "该请求已结束".to_string()),
+        None => Err("该请求已超时或不存在".to_string()),
+    }
 }
 
 // Store the receiver's shared secret and rebind so it takes effect at once
 // (an empty token means "accept anything the tailnet lets through").
 #[tauri::command]
 pub async fn set_receiver_token(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     token: String,
 ) -> Result<(), String> {
@@ -118,7 +166,7 @@ pub async fn set_receiver_token(
         rs.token = token;
     }
     crate::state::stop_receiver(&state);
-    crate::state::start_receiver(&state).await
+    crate::state::start_receiver(&app, &state).await
 }
 
 #[tauri::command]
@@ -168,12 +216,37 @@ pub async fn stat_paths(paths: Vec<String>) -> Result<Vec<Entry>, String> {
         .map_err(|e| e.to_string())?
 }
 
+// One consent round trip per target: the whole batch is confirmed together
+// so a multi-file send pops a single dialog, not one per file. Returns the
+// grant id ("" when the receiver predates consent) for the send calls below.
+#[tauri::command]
+pub async fn request_send(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    target: String,
+    entries: Vec<Entry>,
+) -> Result<String, String> {
+    if entries.is_empty() {
+        return Err("没有可发送的文件".into());
+    }
+    let _ = app;
+    let (ip, port) = discovery::find_target(&target, netcore::DEFAULT_PORT).await?;
+    let addr = format!("{ip}:{port}");
+    let token = state.recv.lock().unwrap().token.clone();
+    netcore::ping(&addr, &token).await?;
+    let sender = netcore::host_name();
+    Ok(netcore::request_consent(&addr, &token, &sender, &entries)
+        .await?
+        .unwrap_or_default())
+}
+
 #[tauri::command]
 pub async fn send_files(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     target: String,
     entries: Vec<Entry>,
+    req_id: Option<String>,
 ) -> Result<u64, String> {
     if entries.is_empty() {
         return Err("没有可发送的文件".into());
@@ -182,6 +255,17 @@ pub async fn send_files(
     let addr = format!("{ip}:{port}");
     let token = state.recv.lock().unwrap().token.clone();
     netcore::ping(&addr, &token).await?;
+    // Consent: the id comes from request_send; callers that skip it still
+    // get one here (covers direct/selftest use).
+    let req_id = match req_id {
+        Some(v) => v,
+        None => {
+            let sender0 = netcore::host_name();
+            netcore::request_consent(&addr, &token, &sender0, &entries)
+                .await?
+                .unwrap_or_default()
+        }
+    };
 
     let batch = state.next_batch();
     let sink = Sink::Gui(app);
@@ -193,15 +277,27 @@ pub async fn send_files(
         let mut failed = 0usize;
         let mut bytes = 0u64;
         for (i, e) in entries.iter().enumerate() {
-            match netcore::push_file(&sink, &addr, &token, &sender, batch, i, n, e).await {
+            match netcore::push_file(&sink, &addr, &token, &sender, &req_id, batch, i, n, e).await {
                 Ok(()) => {
                     okc += 1;
                     bytes += e.size;
-                    sink.file_done(&FileDoneEvt { batch, idx: i, rel: e.rel.clone(), ok: true, error: None });
+                    sink.file_done(&FileDoneEvt {
+                        batch,
+                        idx: i,
+                        rel: e.rel.clone(),
+                        ok: true,
+                        error: None,
+                    });
                 }
                 Err(err) => {
                     failed += 1;
-                    sink.file_done(&FileDoneEvt { batch, idx: i, rel: e.rel.clone(), ok: false, error: Some(err) });
+                    sink.file_done(&FileDoneEvt {
+                        batch,
+                        idx: i,
+                        rel: e.rel.clone(),
+                        ok: false,
+                        error: Some(err),
+                    });
                 }
             }
         }
@@ -223,6 +319,7 @@ pub async fn send_data_begin(
     target: String,
     name: String,
     size: u64,
+    req_id: Option<String>,
 ) -> Result<u64, String> {
     if size > DATA_CAP {
         return Err(format!(
@@ -234,6 +331,20 @@ pub async fn send_data_begin(
     let addr = format!("{ip}:{port}");
     let token = state.recv.lock().unwrap().token.clone();
     netcore::ping(&addr, &token).await?;
+    let req_id = match req_id {
+        Some(v) => v,
+        None => {
+            let entry = vec![netcore::Entry {
+                path: String::new(),
+                rel: name.clone(),
+                size,
+            }];
+            let sender0 = netcore::host_name();
+            netcore::request_consent(&addr, &token, &sender0, &entry)
+                .await?
+                .unwrap_or_default()
+        }
+    };
 
     let id = state.next_data_id();
     let (tx, rx) = tokio::sync::mpsc::channel::<bytes::Bytes>(16);
@@ -241,10 +352,17 @@ pub async fn send_data_begin(
     let sink = Sink::Gui(app);
     let sender = netcore::host_name();
     tokio::spawn(async move {
-        let res = netcore::push_data(&sink, &addr, &token, &sender, id, 0, name, size, rx).await;
+        let res = netcore::push_data(
+            &sink, &addr, &token, &sender, &req_id, id, 0, name, size, rx,
+        )
+        .await;
         let _ = done_tx.send(res);
     });
-    state.slots.lock().unwrap().insert(id, Slot { tx, done: done_rx });
+    state
+        .slots
+        .lock()
+        .unwrap()
+        .insert(id, Slot { tx, done: done_rx });
     Ok(id)
 }
 
@@ -432,6 +550,9 @@ pub async fn open_inbox(state: tauri::State<'_, AppState>) -> Result<(), String>
     #[cfg(target_os = "linux")]
     let r = std::process::Command::new("xdg-open").arg(&dir).spawn();
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    let r: std::io::Result<()> = Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "移动端不支持"));
+    let r: std::io::Result<()> = Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "移动端不支持",
+    ));
     r.map(|_| ()).map_err(|e| e.to_string())
 }

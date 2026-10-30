@@ -1,7 +1,6 @@
 // Transfer core: the HTTP receiver (axum) and the streaming sender (reqwest).
 // Wire-compatible with the Go CLI in the repo root — same endpoints, headers
 // and percent-encoded relative paths, so both ends can talk to each other.
-use std::time::Duration;
 use axum::{
     extract::{connect_info::ConnectInfo, DefaultBodyLimit, Multipart, State},
     http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
@@ -19,6 +18,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use walkdir::WalkDir;
@@ -29,7 +29,11 @@ pub const DATA_CAP: u64 = 1024 * 1024 * 1024;
 
 // Go's url.PathEscape semantics for a path segment: escape everything but
 // unreserved characters; "/" becomes %2F so relative paths survive headers.
-const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'_').remove(b'.').remove(b'~');
+const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
 
 // Data-plane client: no total deadline (a multi-GB stream may legitimately
 // run for hours), but connect and per-read stalls are bounded so a hung
@@ -92,6 +96,53 @@ pub struct RecvCfg {
     // In-flight chunked (v2) uploads, shared by the begin/chunk/complete/abort
     // handlers; each upload serializes its own writes behind a tokio mutex.
     pub uploads: UploadRegistry,
+    // Consent (protocol v3): when on, /api/request must be answered before
+    // any begin/upload is accepted. Grants live in `consents`, the webview's
+    // pending answers in `pending`; both are app-level Arcs so they survive
+    // receiver restarts. `app` is None in selftest, where nobody can answer.
+    pub confirm: bool,
+    pub consents: Consents,
+    pub pending: PendingMap,
+    pub app: Option<tauri::AppHandle>,
+}
+
+pub struct Grant {
+    pub files: HashMap<String, u64>,
+    pub expires: std::time::Instant,
+}
+
+pub type Consents = Arc<Mutex<HashMap<String, Grant>>>;
+pub type PendingMap = Arc<Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>>;
+
+// How long an accepted request stays usable, and how long /api/request waits
+// for the webview (or a person at the CLI twin) to answer.
+const GRANT_TTL: Duration = Duration::from_secs(10 * 60);
+const CONFIRM_WAIT: Duration = Duration::from_secs(30);
+const MAX_REQUEST_FILES: usize = 5000;
+// Shown to senders whose upload names no valid grant.
+const CONSENT_DENIED: &str = "接收端已开启确认接收：请升级发送端，或在接收端关闭确认";
+
+impl RecvCfg {
+    // May name/size transfer under req_id? size_known is false for v1
+    // uploads, whose size arrives with the bytes.
+    pub fn allows(&self, req_id: &str, name: &str, size: u64, size_known: bool) -> bool {
+        if !self.confirm {
+            return true;
+        }
+        let cons = self.consents.lock().unwrap();
+        match cons.get(req_id) {
+            Some(g) if std::time::Instant::now() < g.expires => match g.files.get(name) {
+                Some(want) => !size_known || *want == size,
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    fn sweep(&self) {
+        let now = std::time::Instant::now();
+        self.consents.lock().unwrap().retain(|_, g| now < g.expires);
+    }
 }
 
 pub fn router(cfg: RecvCfg) -> Router {
@@ -105,7 +156,14 @@ pub fn router(cfg: RecvCfg) -> Router {
         .route("/", get(info))
         .route("/api/ping", get(ping_info))
         .route("/api/peers", get(peers_info))
-        .route("/api/upload", post(upload).layer(DefaultBodyLimit::disable()))
+        .route(
+            "/api/request",
+            post(confirm_request).layer(DefaultBodyLimit::max(8 << 20)),
+        )
+        .route(
+            "/api/upload",
+            post(upload).layer(DefaultBodyLimit::disable()),
+        )
         .route(
             "/api/upload/begin",
             post(upload_begin).layer(DefaultBodyLimit::max(CTRL_BODY_MAX)),
@@ -150,6 +208,8 @@ async fn ping_info(
         // `tailscale status`; probing a peer is how it learns its own
         // tailnet IP to advertise.
         "your_ip": peer.ip().to_string(),
+        // Protocol v3: whether transfers need our confirmation first.
+        "confirm": cfg.confirm,
     }))
     .into_response()
 }
@@ -177,6 +237,130 @@ async fn peers_info(State(cfg): State<RecvCfg>, headers: HeaderMap) -> Response 
     }
 }
 
+// ---- consent (protocol v3): bytes flow only after a yes ----
+
+#[derive(Deserialize)]
+struct ReqFile {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    size: u64,
+}
+
+#[derive(Deserialize)]
+struct ReqBody {
+    #[serde(default)]
+    sender: String,
+    #[serde(default)]
+    count: usize,
+    #[serde(default)]
+    total: u64,
+    #[serde(default)]
+    files: Vec<ReqFile>,
+}
+
+// POST /api/request: a sender asks to start a batch. The answer is a grant
+// id (accepted or auto-accepted), a 403 (denied / nobody to ask) or a 408
+// (timed out waiting for an answer).
+async fn confirm_request(
+    State(cfg): State<RecvCfg>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if !token_ok(&headers, &cfg.token) {
+        return err_json(StatusCode::FORBIDDEN, "invalid or missing token");
+    }
+    let req: ReqBody = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("bad json: {e}")),
+    };
+    if req.files.is_empty() || req.files.len() > MAX_REQUEST_FILES {
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            format!("一批最多 {} 个文件", MAX_REQUEST_FILES),
+        );
+    }
+
+    if !cfg.confirm {
+        // Unattended default: accept automatically, as before protocol v3.
+        let id = grant_batch(&cfg, &req.files);
+        return Json(json!({ "ok": true, "id": id })).into_response();
+    }
+    let Some(app) = cfg.app.as_ref() else {
+        return consent_refusal(StatusCode::FORBIDDEN, "unattended");
+    };
+
+    // Surface the request to the webview and hold the HTTP request open
+    // until it answers (request_respond) or the deadline passes. The gate
+    // owns the deadline — a webview that never answers can't hold us forever.
+    let id = new_upload_id();
+    let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+    cfg.pending.lock().unwrap().insert(id.clone(), tx);
+    let preview: Vec<_> = req
+        .files
+        .iter()
+        .take(32)
+        .map(|f| json!({ "name": f.name, "size": f.size }))
+        .collect();
+    {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "incoming-request",
+            json!({
+                "id": id, "sender": req.sender, "count": req.count,
+                "total": req.total, "files": preview,
+            }),
+        );
+    }
+    enum Ans {
+        Yes,
+        No,
+        Timeout,
+    }
+    let ans = tokio::select! {
+        r = rx => {
+            cfg.pending.lock().unwrap().remove(&id);
+            // Err = the answerer's side dropped (webview closed): treat as no.
+            if r.unwrap_or(false) { Ans::Yes } else { Ans::No }
+        }
+        _ = tokio::time::sleep(CONFIRM_WAIT) => { cfg.pending.lock().unwrap().remove(&id); Ans::Timeout }
+    };
+    match ans {
+        Ans::Yes => {
+            let gid = grant_batch(&cfg, &req.files);
+            Json(json!({ "ok": true, "id": gid })).into_response()
+        }
+        Ans::No => consent_refusal(StatusCode::FORBIDDEN, "denied"),
+        Ans::Timeout => consent_refusal(StatusCode::REQUEST_TIMEOUT, "timeout"),
+    }
+}
+
+fn grant_batch(cfg: &RecvCfg, files: &[ReqFile]) -> String {
+    let id = new_upload_id();
+    let map = files.iter().map(|f| (f.name.clone(), f.size)).collect();
+    cfg.consents.lock().unwrap().insert(
+        id.clone(),
+        Grant {
+            files: map,
+            expires: std::time::Instant::now() + GRANT_TTL,
+        },
+    );
+    id
+}
+
+fn consent_refusal(code: StatusCode, reason: &str) -> Response {
+    let text = match reason {
+        "timeout" => "接收端未在限时内确认",
+        "unattended" => "接收端当前无人确认",
+        _ => "接收端拒绝了本次传输",
+    };
+    (
+        code,
+        Json(json!({ "ok": false, "error": text, "reason": reason })),
+    )
+        .into_response()
+}
+
 async fn upload(State(cfg): State<RecvCfg>, headers: HeaderMap, mut mp: Multipart) -> Response {
     if !token_ok(&headers, &cfg.token) {
         return err_json(StatusCode::FORBIDDEN, "invalid or missing token");
@@ -187,7 +371,12 @@ async fn upload(State(cfg): State<RecvCfg>, headers: HeaderMap, mut mp: Multipar
 
     loop {
         let field = match mp.next_field().await {
-            Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("bad multipart stream: {e}")),
+            Err(e) => {
+                return err_json(
+                    StatusCode::BAD_REQUEST,
+                    format!("bad multipart stream: {e}"),
+                )
+            }
             Ok(None) => break,
             Ok(Some(f)) => f,
         };
@@ -203,6 +392,11 @@ async fn upload(State(cfg): State<RecvCfg>, headers: HeaderMap, mut mp: Multipar
                     .decode_utf8()
                     .map(|s| s.into_owned())
                     .unwrap_or(raw);
+                // Consent (v3): checked before any byte is read from the
+                // field; v1 carries no size, so the grant matches on name.
+                if !cfg.allows(&header_get(&headers, "X-Tailsend-Request"), &rel, 0, false) {
+                    return err_json(StatusCode::FORBIDDEN, CONSENT_DENIED);
+                }
                 let dest = match safe_join(&cfg.dir, &rel) {
                     Ok(d) => d,
                     Err(e) => return err_json(StatusCode::BAD_REQUEST, e),
@@ -224,7 +418,11 @@ async fn upload(State(cfg): State<RecvCfg>, headers: HeaderMap, mut mp: Multipar
                             chrono_display(),
                             saved_rel,
                             human(n as i64),
-                            if sender.is_empty() { "(unknown)".to_string() } else { sender.clone() }
+                            if sender.is_empty() {
+                                "(unknown)".to_string()
+                            } else {
+                                sender.clone()
+                            }
                         );
                     }
                     Err(SaveErr::TooBig(limit)) => {
@@ -268,7 +466,10 @@ async fn save_stream(
     // own "*.part-1" split archives.
     static PART_SEQ: AtomicU64 = AtomicU64::new(0);
     let mut tmp = dest.as_os_str().to_os_string();
-    tmp.push(format!(".part-tailsend-{}", PART_SEQ.fetch_add(1, Ordering::Relaxed)));
+    tmp.push(format!(
+        ".part-tailsend-{}",
+        PART_SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
     let tmp = PathBuf::from(tmp);
     let mut f = tokio::fs::File::create(&tmp)
         .await
@@ -340,11 +541,19 @@ pub type UploadRegistry = Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Uploa
 static UPLOAD_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn new_upload_id() -> String {
-    format!("u{}-{}", std::process::id(), UPLOAD_SEQ.fetch_add(1, Ordering::Relaxed))
+    format!(
+        "u{}-{}",
+        std::process::id(),
+        UPLOAD_SEQ.fetch_add(1, Ordering::Relaxed)
+    )
 }
 
 fn header_get(headers: &HeaderMap, name: &str) -> String {
-    headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default().to_string()
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string()
 }
 
 async fn upload_begin(
@@ -359,9 +568,18 @@ async fn upload_begin(
         Ok(v) => v,
         Err(e) => return err_json(StatusCode::BAD_REQUEST, format!("bad json: {e}")),
     };
-    let name = req.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let name = req
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let size = req.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-    let sender = req.get("sender").and_then(|v| v.as_str()).unwrap_or_default().trim().to_string();
+    let sender = req
+        .get("sender")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     if name.is_empty() {
         return err_json(StatusCode::BAD_REQUEST, "文件名为空");
     }
@@ -373,6 +591,15 @@ async fn upload_begin(
     }
     if size > MAX_DECLARED_SIZE {
         return err_json(StatusCode::BAD_REQUEST, "声明的文件大小异常");
+    }
+    // Consent (v3): the header must name a grant that covers name+size.
+    if !cfg.allows(
+        &header_get(&headers, "X-Tailsend-Request"),
+        &name,
+        size,
+        true,
+    ) {
+        return err_json(StatusCode::FORBIDDEN, CONSENT_DENIED);
     }
     let dest = match safe_join(&cfg.dir, &name) {
         Ok(d) => unique_path(d),
@@ -388,7 +615,12 @@ async fn upload_begin(
     ));
     let file = match tokio::fs::File::create(&tmp).await {
         Ok(f) => f,
-        Err(e) => return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("创建临时文件失败：{e}")),
+        Err(e) => {
+            return err_json(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("创建临时文件失败：{e}"),
+            )
+        }
     };
     cfg.uploads.lock().unwrap().insert(
         id.clone(),
@@ -426,7 +658,10 @@ async fn upload_chunk(
     let mut u = up.lock().await;
     let chunks_total = u.size.div_ceil(u.chunk); // 0 for an empty file
     if idx >= chunks_total {
-        return err_json(StatusCode::BAD_REQUEST, format!("chunk {idx} 超出范围（共 {chunks_total}）"));
+        return err_json(
+            StatusCode::BAD_REQUEST,
+            format!("chunk {idx} 超出范围（共 {chunks_total}）"),
+        );
     }
     let off = idx * u.chunk;
     let room = u.chunk.min(u.size - off);
@@ -479,21 +714,31 @@ async fn upload_complete(
     }
     if let Err(e) = u.file.flush().await {
         cfg.uploads.lock().unwrap().insert(id, up.clone());
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("flush 失败：{e}"));
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("flush 失败：{e}"),
+        );
     }
     if let Err(e) = u.file.sync_all().await {
         cfg.uploads.lock().unwrap().insert(id, up.clone());
         return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("sync 失败：{e}"));
     }
-    let (tmp, mut final_path, size, sender) =
-        (u.tmp.clone(), u.final_path.clone(), u.size, u.sender.clone());
+    let (tmp, mut final_path, size, sender) = (
+        u.tmp.clone(),
+        u.final_path.clone(),
+        u.size,
+        u.sender.clone(),
+    );
     drop(u);
     if final_path.exists() {
         final_path = unique_path(final_path); // a sibling landed meanwhile
     }
     if let Err(e) = tokio::fs::rename(&tmp, &final_path).await {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return err_json(StatusCode::INTERNAL_SERVER_ERROR, format!("组装文件失败：{e}"));
+        return err_json(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("组装文件失败：{e}"),
+        );
     }
     let saved_rel = final_path
         .strip_prefix(&cfg.dir)
@@ -505,7 +750,11 @@ async fn upload_complete(
         chrono_display(),
         saved_rel,
         human(size as i64),
-        if sender.is_empty() { "(unknown)".to_string() } else { sender }
+        if sender.is_empty() {
+            "(unknown)".to_string()
+        } else {
+            sender
+        }
     );
     Json(json!({ "ok": true, "path": saved_rel })).into_response()
 }
@@ -590,10 +839,17 @@ fn unique_path(dest: PathBuf) -> PathBuf {
         return dest;
     }
     let dir = dest.parent().unwrap_or(Path::new(".")).to_path_buf();
-    let name = dest.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let name = dest
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
     let (stem, ext) = match dest.extension() {
         Some(e) => (
-            dest.file_stem().unwrap_or_default().to_string_lossy().to_string(),
+            dest.file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string(),
             format!(".{}", e.to_string_lossy()),
         ),
         None => (name.clone(), String::new()),
@@ -647,9 +903,7 @@ fn is_rust_upload_id(s: &str) -> bool {
 
 fn is_drive_prefix(seg: &str) -> bool {
     let b = seg.as_bytes();
-    b.len() >= 2
-        && b[1] == b':'
-        && (b[0].is_ascii_lowercase() || b[0].is_ascii_uppercase())
+    b.len() >= 2 && b[1] == b':' && (b[0].is_ascii_lowercase() || b[0].is_ascii_uppercase())
 }
 
 // Delete .tspart-*/.part-* leftovers from a crashed run. Only safe while the
@@ -670,6 +924,7 @@ pub async fn janitor(cfg: RecvCfg) {
     const IDLE: Duration = Duration::from_secs(3600);
     loop {
         tokio::time::sleep(TICK).await;
+        cfg.sweep();
         let mut stale: Vec<(String, PathBuf)> = Vec::new();
         {
             let reg = cfg.uploads.lock().unwrap();
@@ -726,7 +981,9 @@ pub struct PingInfo {
 }
 
 pub async fn ping(addr: &str, token: &str) -> Result<PingInfo, String> {
-    let mut req = client().get(format!("http://{addr}/api/ping")).timeout(std::time::Duration::from_secs(5));
+    let mut req = client()
+        .get(format!("http://{addr}/api/ping"))
+        .timeout(std::time::Duration::from_secs(5));
     if !token.is_empty() {
         req = req.header("X-Tailsend-Token", token);
     }
@@ -895,7 +1152,11 @@ pub fn collect_entries(paths: &[String]) -> Result<Vec<Entry>, String> {
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
                 .unwrap_or_else(|| p.clone());
-            out.push(Entry { path: p.clone(), rel: name, size: md.len() });
+            out.push(Entry {
+                path: p.clone(),
+                rel: name,
+                size: md.len(),
+            });
         } else if md.is_dir() {
             let prefix = pb
                 .file_name()
@@ -932,14 +1193,15 @@ pub async fn push_file(
     addr: &str,
     token: &str,
     sender: &str,
+    req_id: &str,
     batch: u64,
     idx: usize,
     _total: usize,
     entry: &Entry,
 ) -> Result<(), String> {
-    match push_file_chunked(sink, addr, token, sender, batch, idx, entry).await {
+    match push_file_chunked(sink, addr, token, sender, req_id, batch, idx, entry).await {
         Ok(true) => Ok(()),
-        Ok(false) => push_file_v1(sink, addr, token, sender, batch, idx, 0, entry).await,
+        Ok(false) => push_file_v1(sink, addr, token, sender, req_id, batch, idx, 0, entry).await,
         Err(e) => Err(e),
     }
 }
@@ -951,13 +1213,16 @@ async fn push_file_v1(
     addr: &str,
     token: &str,
     sender: &str,
+    req_id: &str,
     batch: u64,
     idx: usize,
     _total: usize,
     entry: &Entry,
 ) -> Result<(), String> {
     let path = PathBuf::from(&entry.path);
-    let file = tokio::fs::File::open(&path).await.map_err(|e| format!("打开 {} 失败：{e}", entry.rel))?;
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| format!("打开 {} 失败：{e}", entry.rel))?;
     let size = entry.size;
     let seg = percent_encode(entry.rel.as_bytes(), &SEGMENT).to_string();
 
@@ -973,13 +1238,32 @@ async fn push_file_v1(
             if should {
                 s.1 = loaded;
                 drop(s);
-                sink2.progress(&ProgressEvt { batch, idx, rel: rel2.clone(), loaded, total: size });
+                sink2.progress(&ProgressEvt {
+                    batch,
+                    idx,
+                    rel: rel2.clone(),
+                    loaded,
+                    total: size,
+                });
             }
         }
         chunk
     });
 
-    send_part(sink, addr, token, sender, batch, idx, size, &entry.rel, seg, reqwest::Body::wrap_stream(stream)).await
+    send_part(
+        sink,
+        addr,
+        token,
+        sender,
+        req_id,
+        batch,
+        idx,
+        size,
+        &entry.rel,
+        seg,
+        reqwest::Body::wrap_stream(stream),
+    )
+    .await
 }
 
 const CHUNK_CONCURRENCY: usize = 4;
@@ -992,24 +1276,36 @@ async fn push_file_chunked(
     addr: &str,
     token: &str,
     sender: &str,
+    req_id: &str,
     batch: u64,
     idx: usize,
     entry: &Entry,
 ) -> Result<bool, String> {
     let begin = json!({ "name": entry.rel, "size": entry.size, "sender": sender });
-    let (status, body) = post_json(addr, token, "/api/upload/begin", &begin).await?;
+    // Consent (v3): uploads must name the grant from /api/request.
+    let mut hdr = serde_json::Map::new();
+    if !req_id.is_empty() {
+        hdr.insert("X-Tailsend-Request".into(), json!(req_id));
+    }
+    let (status, body) = post_json_hdr(addr, token, "/api/upload/begin", &begin, &hdr).await?;
     if status == StatusCode::NOT_FOUND || status == StatusCode::NOT_IMPLEMENTED {
         return Ok(false);
     }
-    let r: BeginResp = serde_json::from_slice(&body)
-        .map_err(|_| format!("接收端返回异常（HTTP {status}）"))?;
+    let r: BeginResp =
+        serde_json::from_slice(&body).map_err(|_| format!("接收端返回异常（HTTP {status}）"))?;
     if !r.ok || status != StatusCode::OK {
-        return Err(r.error.unwrap_or_else(|| format!("接收端拒绝（HTTP {status}）")));
+        return Err(r
+            .error
+            .unwrap_or_else(|| format!("接收端拒绝（HTTP {status}）")));
     }
 
     let size = entry.size;
     // Cap the peer's chunk suggestion so our read buffers stay bounded.
-    let chunk = if r.chunk == 0 { UPLOAD_CHUNK } else { r.chunk.min(32 * 1024 * 1024) };
+    let chunk = if r.chunk == 0 {
+        UPLOAD_CHUNK
+    } else {
+        r.chunk.min(32 * 1024 * 1024)
+    };
     let nchunks = size.div_ceil(chunk);
 
     let loaded = Arc::new(AtomicU64::new(0));
@@ -1057,13 +1353,22 @@ async fn push_file_chunked(
         return Err(e);
     }
 
-    let (status, body) = post_json(addr, token, "/api/upload/complete", &json!({ "id": r.id })).await?;
-    let cr: UploadResp = serde_json::from_slice(&body)
-        .map_err(|_| format!("接收端返回异常（HTTP {status}）"))?;
+    let (status, body) =
+        post_json(addr, token, "/api/upload/complete", &json!({ "id": r.id })).await?;
+    let cr: UploadResp =
+        serde_json::from_slice(&body).map_err(|_| format!("接收端返回异常（HTTP {status}）"))?;
     if !cr.ok || status != StatusCode::OK {
-        return Err(cr.error.unwrap_or_else(|| format!("接收端组装文件失败（HTTP {status}）")));
+        return Err(cr
+            .error
+            .unwrap_or_else(|| format!("接收端组装文件失败（HTTP {status}）")));
     }
-    sink.progress(&ProgressEvt { batch, idx, rel: entry.rel.clone(), loaded: size, total: size });
+    sink.progress(&ProgressEvt {
+        batch,
+        idx,
+        rel: entry.rel.clone(),
+        loaded: size,
+        total: size,
+    });
     Ok(true)
 }
 
@@ -1074,14 +1379,93 @@ async fn post_json(
     path: &str,
     value: &serde_json::Value,
 ) -> Result<(StatusCode, bytes::Bytes), String> {
-    let mut req = ctrl_client().post(format!("http://{addr}{path}")).json(value);
+    post_json_hdr(addr, token, path, value, &serde_json::Map::new()).await
+}
+
+async fn post_json_hdr(
+    addr: &str,
+    token: &str,
+    path: &str,
+    value: &serde_json::Value,
+    hdr: &serde_json::Map<String, serde_json::Value>,
+) -> Result<(StatusCode, bytes::Bytes), String> {
+    let mut req = ctrl_client()
+        .post(format!("http://{addr}{path}"))
+        .json(value);
     if !token.is_empty() {
         req = req.header("X-Tailsend-Token", token);
     }
+    for (k, v) in hdr {
+        if let Some(s) = v.as_str() {
+            req = req.header(k.as_str(), s);
+        }
+    }
     let resp = req.send().await.map_err(|e| format!("发送失败：{e}"))?;
     let status = resp.status();
-    let body = resp.bytes().await.map_err(|e| format!("读取响应失败：{e}"))?;
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取响应失败：{e}"))?;
     Ok((status, body))
+}
+
+// Ask the receiver for permission to start sending (protocol v3). Returns
+// the grant id to attach to every upload, or None when the receiver predates
+// consent (no such route) and sending starts as before.
+pub async fn request_consent(
+    addr: &str,
+    token: &str,
+    sender: &str,
+    entries: &[Entry],
+) -> Result<Option<String>, String> {
+    let files: Vec<_> = entries
+        .iter()
+        .map(|e| json!({ "name": e.rel, "size": e.size }))
+        .collect();
+    let total: u64 = entries.iter().map(|e| e.size).sum();
+    let payload =
+        json!({ "sender": sender, "count": entries.len(), "total": total, "files": files });
+
+    // The receiver may hold the request open up to CONFIRM_WAIT while a human
+    // decides; give the round trip a little headroom.
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(CONFIRM_WAIT + Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let mut req = client
+        .post(format!("http://{addr}/api/request"))
+        .json(&payload);
+    if !token.is_empty() {
+        req = req.header("X-Tailsend-Token", token);
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("无法请求对方确认：{e}"))?;
+    let status = resp.status();
+    let body = resp.bytes().await.unwrap_or_default();
+    if status == StatusCode::NOT_FOUND || status == StatusCode::NOT_IMPLEMENTED {
+        return Ok(None); // old receiver: no consent, send as before
+    }
+    let r: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    if status == StatusCode::OK && r.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+        let id = r
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        if id.is_empty() {
+            return Err("接收端授权响应缺少 id".into());
+        }
+        return Ok(Some(id));
+    }
+    let reason = r.get("reason").and_then(|v| v.as_str()).unwrap_or_default();
+    Err(match reason {
+        "timeout" => "对方未在限时内确认，已取消发送".to_string(),
+        "unattended" => "对方开启了确认接收，但当前无人应答".to_string(),
+        _ => "对方拒绝了本次传输".to_string(),
+    })
 }
 
 // Read one chunk from disk and push it (with retries); advances the shared
@@ -1138,7 +1522,12 @@ async fn upload_chunk_task(
                                 let prev = last_emit.load(Ordering::Relaxed);
                                 if done >= size || done - prev >= step {
                                     if last_emit
-                                        .compare_exchange(prev, done, Ordering::Relaxed, Ordering::Relaxed)
+                                        .compare_exchange(
+                                            prev,
+                                            done,
+                                            Ordering::Relaxed,
+                                            Ordering::Relaxed,
+                                        )
                                         .is_ok()
                                     {
                                         sink.progress(&ProgressEvt {
@@ -1153,7 +1542,9 @@ async fn upload_chunk_task(
                                 return Ok(());
                             }
                             Some(r) => {
-                                err = r.error.unwrap_or_else(|| format!("接收端拒绝分块 {ci}（HTTP {status}）"))
+                                err = r.error.unwrap_or_else(|| {
+                                    format!("接收端拒绝分块 {ci}（HTTP {status}）")
+                                })
                             }
                             None => err = format!("接收端返回异常（HTTP {status}）"),
                         }
@@ -1174,6 +1565,7 @@ pub async fn push_data(
     addr: &str,
     token: &str,
     sender: &str,
+    req_id: &str,
     batch: u64,
     idx: usize,
     rel: String,
@@ -1193,13 +1585,32 @@ pub async fn push_data(
         if should {
             s.1 = loaded;
             drop(s);
-            sink2.progress(&ProgressEvt { batch, idx, rel: rel2.clone(), loaded, total: size });
+            sink2.progress(&ProgressEvt {
+                batch,
+                idx,
+                rel: rel2.clone(),
+                loaded,
+                total: size,
+            });
         }
         Ok::<bytes::Bytes, std::io::Error>(chunk)
     });
 
     let seg = percent_encode(rel.as_bytes(), &SEGMENT).to_string();
-    send_part(sink, addr, token, sender, batch, idx, size, &rel, seg, reqwest::Body::wrap_stream(stream)).await
+    send_part(
+        sink,
+        addr,
+        token,
+        sender,
+        req_id,
+        batch,
+        idx,
+        size,
+        &rel,
+        seg,
+        reqwest::Body::wrap_stream(stream),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1208,6 +1619,7 @@ async fn send_part(
     addr: &str,
     token: &str,
     sender: &str,
+    req_id: &str,
     batch: u64,
     idx: usize,
     size: u64,
@@ -1219,6 +1631,9 @@ async fn send_part(
     if !token.is_empty() {
         req = req.header("X-Tailsend-Token", token);
     }
+    if !req_id.is_empty() {
+        req = req.header("X-Tailsend-Request", req_id);
+    }
     let part = reqwest::multipart::Part::stream_with_length(body, size).file_name(seg);
     let form = reqwest::multipart::Form::new()
         .text("sender", sender.to_string())
@@ -1229,13 +1644,21 @@ async fn send_part(
         .await
         .map_err(|e| format!("发送失败：{e}"))?;
     let status = resp.status();
-    sink.progress(&ProgressEvt { batch, idx, rel: rel.to_string(), loaded: size, total: size });
+    sink.progress(&ProgressEvt {
+        batch,
+        idx,
+        rel: rel.to_string(),
+        loaded: size,
+        total: size,
+    });
     let r: UploadResp = resp
         .json()
         .await
         .map_err(|_| format!("接收端返回异常（HTTP {status}）"))?;
     if !r.ok || status != StatusCode::OK {
-        return Err(r.error.unwrap_or_else(|| format!("接收端拒绝（HTTP {status}）")));
+        return Err(r
+            .error
+            .unwrap_or_else(|| format!("接收端拒绝（HTTP {status}）")));
     }
     Ok(())
 }

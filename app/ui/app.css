@@ -900,3 +900,96 @@ button.ghost.on {
   }
   .targetbar .tb-chev { transition: none; }
 }
+
+/* --------------------------------------------------- incoming request dialog */
+
+.req-backdrop[hidden] { display: none; } /* 类选择器会压过 [hidden] 的 UA 样式 */
+.req-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: color-mix(in srgb, var(--bg) 55%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.req-card {
+  width: min(430px, 100%);
+  max-height: min(80vh, 560px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 18px 16px;
+  border-radius: 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.28);
+  animation: req-pop 0.18s ease-out;
+}
+@keyframes req-pop {
+  from { transform: translateY(10px) scale(0.98); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+.req-head { display: flex; align-items: center; gap: 12px; }
+.req-badge {
+  flex: none;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 62%, #6ea8ff));
+}
+.req-who { min-width: 0; }
+.req-who h3 { margin: 0; font-size: 15px; }
+.req-sub {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.req-timer {
+  margin-left: auto;
+  font-size: 20px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+}
+.req-timer.low { color: var(--err); }
+.req-files {
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  overflow-y: auto;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 65%, transparent);
+}
+.req-files li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 5px 6px;
+  min-width: 0;
+}
+.req-files .rfn {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.req-files .rfs { flex: none; font-size: 12px; color: var(--muted); }
+.req-files .rfmore { font-size: 12.5px; color: var(--muted); }
+.req-btns { display: flex; gap: 10px; justify-content: flex-end; }
+.req-btns .ghost { padding: 8px 14px; }
+.req-btns .primary { padding: 8px 22px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .req-card { animation: none; }
+}

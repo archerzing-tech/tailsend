@@ -565,6 +565,65 @@ function updateRow(item) {
   if (size) size.textContent = fmtSize(item.loaded) + " / " + fmtSize(item.size);
 }
 
+/* ------------------------------------------------------- incoming requests */
+
+let reqQueue = [];
+let reqCur = null; // { id, deadline }
+let reqTimer = null;
+
+function showRequest(p) {
+  reqQueue.push(p);
+  if (!reqCur) nextRequest();
+}
+
+function nextRequest() {
+  const p = reqQueue.shift();
+  if (!p) { reqCur = null; $("req-backdrop").hidden = true; return; }
+  reqCur = { id: p.id };
+  $("req-sub").textContent = `来自 ${p.sender || "未知设备"} · ${p.count} 个文件 · ${fmtSize(p.total)}`;
+  const list = $("req-files");
+  const shown = (p.files || []).slice(0, 8);
+  list.innerHTML = shown.map((f) => {
+    const k = fileKind(f.name);
+    return `<li><span class="itic k-${k}" aria-hidden="true">${FILE_ICONS[k]}</span><span class="rfn">${esc(f.name)}</span><span class="rfs">${fmtSize(f.size)}</span></li>`;
+  }).join("") + (p.count > shown.length ? `<li class="rfmore">… 等共 ${p.count} 个文件</li>` : "");
+  $("req-backdrop").hidden = false;
+  let left = 30;
+  $("req-timer").textContent = left;
+  $("req-timer").classList.remove("low");
+  clearInterval(reqTimer);
+  reqTimer = setInterval(() => {
+    left -= 1;
+    $("req-timer").textContent = Math.max(left, 0);
+    if (left <= 10) $("req-timer").classList.add("low");
+    if (left <= 0) { // UI 层关窗；接收端 30 秒未应答会自行取消授权
+      clearInterval(reqTimer);
+      dismissRequest();
+    }
+  }, 1000);
+}
+
+// Close without answering (timer ran out / request replaced): the receiver
+// side times the request out on its own — this only clears our dialog.
+function dismissRequest() {
+  clearInterval(reqTimer);
+  reqCur = null;
+  $("req-backdrop").hidden = true;
+  nextRequest();
+}
+
+async function answerRequest(accept) {
+  const id = reqCur && reqCur.id;
+  clearInterval(reqTimer);
+  reqCur = null;
+  $("req-backdrop").hidden = true;
+  if (id) {
+    try { await invoke("request_respond", { id, accept }); }
+    catch (e) { toast(String((e && e.message) || e), "err"); }
+  }
+  nextRequest();
+}
+
 /* ---------------------------------------------------------------- sending */
 
 function updateOverall(doneBytes, totalBytes, t0) {
@@ -589,8 +648,8 @@ function b64(buf) {
   return btoa(s);
 }
 
-async function sendData(item, addr) {
-  const { id } = await invoke("send_data_begin", { target: addr, name: item.rel, size: item.size });
+async function sendData(item, addr, reqId = "") {
+  const { id } = await invoke("send_data_begin", { target: addr, name: item.rel, size: item.size, reqId: reqId || null });
   pendingBatch.set("d:" + id, { item, res: () => {}, rej: () => {} });
   try {
     for (let off = 0; off < item.size; off += CHUNK) {
@@ -623,6 +682,24 @@ async function send() {
   let okc = 0, failc = 0;
 
   for (const pt of perTarget) {
+    // One consent round trip per target: the whole batch is confirmed on the
+    // receiver together, so a multi-file send pops one dialog, not many.
+    // Sends below carry the grant id; old receivers answer "" and proceed.
+    $("btn-send").textContent = `等待 ${pt.t.label} 确认…`;
+    const entries = ready.map((i) => ({ path: i.path, rel: i.rel, size: i.size }));
+    let reqId = "";
+    try {
+      reqId = (await invoke("request_send", { target: pt.t.addr, entries })) || "";
+    } catch (err) {
+      // Refused / nobody there / timeout: the whole batch fails for this
+      // target — say so once, keep the other targets going.
+      pt.fail += ready.length; failc += ready.length;
+      const why = String((err && err.message) || err);
+      ready.forEach((i) => { i.tried++; i.error = why; });
+      toast(`→ ${pt.t.label}：${why}`, "err");
+      continue;
+    }
+    $("btn-send").textContent = "发送中…";
     for (const item of ready) {
       item.status = "sending";
       item.loaded = 0;
@@ -632,10 +709,11 @@ async function send() {
           const batch = await invoke("send_files", {
             target: pt.t.addr,
             entries: [{ path: item.path, rel: item.rel, size: item.size }],
+            reqId: reqId || null,
           });
           await new Promise((res, rej) => pendingBatch.set("p:" + batch, { item, res, rej }));
         } else {
-          await sendData(item, pt.t.addr);
+          await sendData(item, pt.t.addr, reqId);
         }
         pt.ok++; okc++; item.okN++;
       } catch (err) {
@@ -658,6 +736,7 @@ async function send() {
 
   sending = false;
   document.body.classList.remove("sending");
+  $("btn-send").textContent = "发送";
   renderQueue(); // 恢复各行 ✕（发送期间删除钮整体隐藏）
   updateSendBtn();
   perTarget.forEach((x) => { if (x.ok > 0) saveTarget(x.t.addr, x.t.label); }); // remember where sends succeed
@@ -760,6 +839,25 @@ function wire() {
     try { await invoke("open_inbox"); } catch (e) { toast(String(e), "err"); }
   };
   // Receiver token: optional shared secret senders must quote.
+  // 确认接收开关（协议 v3）：默认开——收到的传输先确认再落盘。
+  const applyConfirm = () => {
+    let on = true;
+    try { on = localStorage.getItem("ts.confirm.v1") !== "0"; } catch { /* ignore */ }
+    $("btn-confirm").setAttribute("aria-pressed", String(on));
+  };
+  applyConfirm();
+  $("btn-confirm").onclick = async () => {
+    const on = $("btn-confirm").getAttribute("aria-pressed") !== "true";
+    try {
+      localStorage.setItem("ts.confirm.v1", on ? "1" : "0");
+    } catch { /* ignore */ }
+    $("btn-confirm").setAttribute("aria-pressed", String(on));
+    try { await invoke("set_confirm", { confirm: on }); } catch (e) { toast(String((e && e.message) || e), "err"); }
+    toast(on ? "接收前会先确认每个传输" : "已开启自动接收，不再询问", "ok");
+  };
+  $("req-deny").onclick = () => answerRequest(false);
+  $("req-accept").onclick = () => answerRequest(true);
+
   $("btn-token").onclick = () => {
     const row = $("token-row");
     row.hidden = !row.hidden;
@@ -855,6 +953,12 @@ function wire() {
       invoke("set_receiver_token", { token: t }).catch(() => {});
     }
   } catch { /* ignore */ }
+  // Re-apply the confirmation preference at boot (default: confirm).
+  try {
+    invoke("set_confirm", { confirm: localStorage.getItem("ts.confirm.v1") !== "0" }).catch(() => {});
+  } catch { /* ignore */ }
+  // Incoming transfer requests (protocol v3) pop the consent dialog.
+  listen("incoming-request", (e) => showRequest(e.payload));
 
   loadStatus();
   loadPeers();

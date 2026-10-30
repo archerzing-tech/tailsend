@@ -113,6 +113,7 @@
           <div class="card-head">
             <h2>收件箱 <span class="count" id="inbox-count"></span></h2>
             <span class="head-btns">
+              <button class="ghost" id="btn-confirm" aria-pressed="true" title="开启时，收到的传输要先确认才会开始">确认接收</button>
               <button class="ghost" id="btn-token" aria-expanded="false">令牌</button>
               <button class="ghost" id="btn-open">打开文件夹</button>
             </span>
@@ -128,6 +129,25 @@
     </div>
   </main>
 
+  <div class="req-backdrop" id="req-backdrop" hidden>
+    <div class="req-card" role="dialog" aria-modal="true" aria-labelledby="req-title">
+      <div class="req-head">
+        <span class="req-badge" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
+        </span>
+        <div class="req-who">
+          <h3 id="req-title">收到传输请求</h3>
+          <p class="req-sub" id="req-sub"></p>
+        </div>
+        <span class="req-timer" id="req-timer">30</span>
+      </div>
+      <ul class="req-files" id="req-files"></ul>
+      <div class="req-btns">
+        <button class="ghost" id="req-deny">拒绝</button>
+        <button class="primary" id="req-accept">接收</button>
+      </div>
+    </div>
+  </div>
   <div class="sheet-backdrop" id="sheet-backdrop" aria-hidden="true"></div>
   <div class="toasts" id="toasts"></div>
   <script src="app.js"></script>

@@ -9,6 +9,10 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 pub struct AppState {
     pub recv: Mutex<RecvState>,
+    // Consent (protocol v3) state, shared with the receiver handlers via
+    // RecvCfg and owned here so answers outlive receiver restarts.
+    pub consents: crate::netcore::Consents,
+    pub pending: crate::netcore::PendingMap,
     // Serializes start_receiver: without it a manual restart and a bootstrap
     // retry can both pass the listening check and race on the bind.
     pub start_lock: tokio::sync::Mutex<()>,
@@ -26,6 +30,7 @@ pub struct RecvState {
     pub port: u16,
     pub token: String,
     pub max: u64,
+    pub confirm: bool,
     shutdown: Option<watch::Sender<()>>,
 }
 
@@ -77,12 +82,15 @@ impl AppState {
                 port: crate::netcore::DEFAULT_PORT,
                 token: String::new(),
                 max: 0,
+                confirm: true,
                 shutdown: None,
             }),
             start_lock: tokio::sync::Mutex::new(()),
             batch_seq: AtomicU64::new(1),
             data_seq: AtomicU64::new(1),
             slots: Mutex::new(HashMap::new()),
+            consents: std::sync::Arc::default(),
+            pending: std::sync::Arc::default(),
         }
     }
 
@@ -100,7 +108,7 @@ impl AppState {
 }
 
 // Bind the tailnet receiver; on failure record why and keep serving the UI.
-pub async fn start_receiver(state: &AppState) -> Result<(), String> {
+pub async fn start_receiver(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
     let _serial = state.start_lock.lock().await;
     {
         let rs = state.recv.lock().unwrap();
@@ -140,13 +148,18 @@ pub async fn start_receiver(state: &AppState) -> Result<(), String> {
             max: rs.max,
             host: crate::netcore::host_name(),
             uploads: std::sync::Arc::default(),
+            confirm: rs.confirm,
+            consents: state.consents.clone(),
+            pending: state.pending.clone(),
+            app: Some(app.clone()),
         }
     };
     // Crash leftovers from a previous run: clean before serving so the sweep
     // can never race a live upload (awaited on purpose).
     {
         let dir = cfg.dir.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || crate::netcore::sweep_spools(&dir)).await;
+        let _ =
+            tauri::async_runtime::spawn_blocking(move || crate::netcore::sweep_spools(&dir)).await;
     }
     tauri::async_runtime::spawn(crate::netcore::janitor(cfg.clone()));
     let serve = axum::serve(
@@ -200,14 +213,14 @@ async fn resolve_bind() -> Result<(String, Vec<String>), String> {
 // receiver comes up on its own within ~20s.
 pub async fn bootstrap(app: tauri::AppHandle) {
     let state = app.state::<AppState>();
-    let _ = start_receiver(&state).await;
+    let _ = start_receiver(&app, &state).await;
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(20));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
         let listening = state.recv.lock().unwrap().listening;
         if !listening {
-            let _ = start_receiver(&state).await;
+            let _ = start_receiver(&app, &state).await;
         }
     }
 }
