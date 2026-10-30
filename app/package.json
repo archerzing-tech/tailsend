@@ -1,6 +1,6 @@
 {
   "name": "tailsend-app",
-  "version": "0.0.3",
+  "version": "0.1.0",
   "description": "Tailsend — file transfer across your tailnet (Tauri UI)",
   "private": true,
   "scripts": {
