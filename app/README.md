@@ -2,6 +2,8 @@
 
 Tailsend 的图形界面版：桌面 + 手机，一套 Rust 核心。
 
+![Tailsend 界面](../docs/screenshot-desktop.png)
+
 ```
 ┌────────────── ui/（HTML/CSS/JS，无打包器）──────────────┐
 │  节点列表 · 拖拽/选择文件 · 队列与进度 · 收件箱           │

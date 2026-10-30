@@ -16,6 +16,12 @@
 - **发送** — 把文件或目录发给选中的节点
 - **接收** — 在本机启动接收端，等别人发文件过来
 
+## 界面一览
+
+![Tailsend 桌面端](docs/screenshot-desktop.png)
+
+*桌面端：左栏是 tailnet 节点列表（圆点小灯 = 实测过的可发送状态：绿=对方 Tailsend 在跑，黄=在线但没开 Tailsend，灰=离线），右侧拖文件进来或三种方式选择文件，底部收件箱列出收到的文件。手机端是同一套界面的自适应布局，节点列表换成「收藏目标」。*
+
 ## 前置条件：必须先安装并登录 Tailscale
 
 **Tailsend 不自带组网能力，它完全依赖 [Tailscale](https://tailscale.com) 传输。** 没装 Tailscale 或没连上 tailnet 时，节点列表为空、收发都会失败。开始之前：
