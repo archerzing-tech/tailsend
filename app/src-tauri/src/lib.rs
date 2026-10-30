@@ -23,6 +23,7 @@ pub fn run() {
             commands::send_data_chunk,
             commands::send_data_end,
             commands::inbox_list,
+            commands::inbox_delete,
             commands::open_inbox,
         ])
         .setup(|app| {

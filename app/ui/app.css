@@ -398,6 +398,7 @@ button:focus-visible, input:focus-visible {
   gap: 8px;
   padding: 12px 20px 0;
 }
+.token-row[hidden] { display: none; } /* display:flex 会压过 hidden 属性的 UA 样式 */
 .token-row input {
   flex: 1;
   min-width: 0;
@@ -517,10 +518,13 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
 }
 
 .drop {
+  display: flex;
+  align-items: center;
+  gap: 14px;
   border: 1.5px dashed color-mix(in srgb, var(--border) 70%, var(--muted));
   border-radius: 14px;
-  padding: 32px 18px 28px;
-  text-align: center;
+  padding: 13px 16px;
+  text-align: left;
   background: color-mix(in srgb, var(--panel-2) 45%, transparent);
   transition: border-color 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
 }
@@ -531,15 +535,17 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
   box-shadow: 0 0 0 4px var(--accent-soft);
 }
 
-.drop-glyph { width: 34px; height: 34px; stroke: var(--muted); fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.drop-glyph { flex: none; width: 26px; height: 26px; stroke: var(--muted); fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 
 .drop.over .drop-glyph { stroke: var(--accent); }
 
-.drop-title { margin: 10px 0 2px; font-weight: 650; font-size: 14.5px; }
+.drop-copy { flex: 1; min-width: 0; }
 
-.drop-hint { margin: 2px 0 12px; color: var(--muted); font-size: 12.5px; }
+.drop-title { margin: 0; font-weight: 650; font-size: 13.5px; white-space: nowrap; }
 
-.drop-btns { display: flex; gap: 9px; justify-content: center; flex-wrap: wrap; }
+.drop-hint { margin: 1px 0 0; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+
+.drop-btns { display: flex; gap: 8px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
 
 /* ---------------------------------------------------------------- queue */
 
@@ -606,13 +612,13 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
 
 .inbox-card .card-head { margin-bottom: 8px; }
 
-.inbox { list-style: none; margin: 0; padding: 0; max-height: 216px; overflow-y: auto; }
+.inbox { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; }
 
 .inbox li {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 9px 8px;
+  gap: 11px;
+  padding: 7px 8px;
   border-radius: 9px;
   border-bottom: 1px solid var(--border-soft);
 }
@@ -626,11 +632,72 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
   100% { background: transparent; }
 }
 
-.inbox .ipath { flex: 1; min-width: 0; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 类型图标 tile：一个圆角小方块，按文件类型着色 */
+.itic {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+}
+.itic svg { width: 16px; height: 16px; fill: none; stroke: #fff; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.itic.k-img { background: #3e9b4f; }
+.itic.k-vid { background: #8e5bd6; }
+.itic.k-aud { background: #2f9e9e; }
+.itic.k-zip { background: #d08a2e; }
+.itic.k-pdf { background: #cc5544; }
+.itic.k-doc { background: #3b7bd6; }
+.itic.k-bin { background: color-mix(in srgb, var(--muted) 78%, transparent); }
 
-.inbox .isize { flex: none; color: var(--muted); font-size: 11.5px; }
+.inbox .imeta { flex: 1; min-width: 0; }
 
-.inbox .itime { flex: none; color: var(--muted); font-size: 11.5px; }
+.inbox .iname {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inbox .isub {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inbox li.in .itic { animation: recvpulse 1.4s ease-in-out infinite; }
+.inbox li.in .isub { color: var(--accent); }
+
+@keyframes recvpulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.inbox .idel {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+.inbox li:hover .idel, .inbox .idel:focus-visible, .inbox .idel.arm { opacity: 1; }
+.inbox .idel:hover { background: var(--panel-2); color: var(--text); }
+.inbox .idel.arm { background: #e5484d; color: #fff; font-size: 11px; font-weight: 650; width: auto; padding: 0 9px; border-radius: 999px; height: 24px; }
 
 /* ---------------------------------------------------------------- toasts */
 
@@ -664,6 +731,7 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
 
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
+  .inbox li.in .itic { animation: none; }
 }
 
 .toast.ok { border-left-color: var(--ok); }
@@ -690,7 +758,10 @@ button.ghost.on {
   .grid { grid-template-columns: 1fr; }
   .statusbar { width: 100%; justify-content: space-between; flex-wrap: wrap; row-gap: 2px; }
   .seg { max-width: 100%; min-width: 0; }
-  .drop { padding: 24px 12px 20px; }
+  .drop { flex-wrap: wrap; row-gap: 10px; padding: 11px 12px; gap: 10px; }
+  .drop-hint { display: none; }
+  .drop-btns { flex: 1 1 100%; justify-content: flex-start; }
+  .inbox .idel { opacity: 1; }
   .sendbar { flex-wrap: wrap; }
   .send { flex: 1; }
   .linkstrip .node { max-width: 12ch; }

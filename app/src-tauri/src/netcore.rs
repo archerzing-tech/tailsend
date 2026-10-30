@@ -519,7 +519,7 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 // Join rel under base, refusing traversal outside it (Go-safeJoin twin).
-fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, String> {
+pub fn safe_join(base: &Path, rel: &str) -> Result<PathBuf, String> {
     let rel = rel.replace('\\', "/");
     let mut out = base.to_path_buf();
     let mut any = false;
@@ -572,7 +572,7 @@ fn unique_path(dest: PathBuf) -> PathBuf {
 // (.tspart-…), the Go v1 partial (.part-<12 hex>) and the Rust v1 partial
 // (.part-tailsend-<seq>). A user's own "file.part-1" split archives never
 // match (Go-side twin: isTempName).
-fn is_temp_name(name: &str) -> bool {
+pub fn is_temp_name(name: &str) -> bool {
     if let Some(i) = name.rfind(".tspart-") {
         let s = &name[i + ".tspart-".len()..];
         if is_hex_len(s, 16) || is_rust_upload_id(s) {

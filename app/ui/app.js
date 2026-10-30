@@ -609,23 +609,66 @@ async function send() {
 
 /* ---------------------------------------------------------------- inbox */
 
+// 类型 → 配色 tile 里的小图标（stroke 线稿，CSS 上色）
+const IN_ICONS = {
+  img: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M5.5 17.5l4-4 3.5 3.5 3-3 2.5 2.5"/></svg>',
+  vid: '<svg viewBox="0 0 24 24"><rect x="3" y="5.5" width="13" height="13" rx="2.5"/><path d="M16 10l4.5-2.5v9L16 14"/></svg>',
+  aud: '<svg viewBox="0 0 24 24"><path d="M9.5 17V6.5l9-2v10.5"/><circle cx="7.2" cy="17.5" r="2.2"/><circle cx="16.2" cy="14.5" r="2.2"/></svg>',
+  zip: '<svg viewBox="0 0 24 24"><rect x="4.5" y="3.5" width="15" height="17" rx="2.5"/><path d="M12 4.5v2.5m0 2.5V12m0 2.5V17"/></svg>',
+  doc: '<svg viewBox="0 0 24 24"><path d="M7 3.5h6L17.5 8v11a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2z"/><path d="M12.8 3.7V8.2h4.5M9.5 13h5m-5 3.5h5"/></svg>',
+  bin: '<svg viewBox="0 0 24 24"><path d="M7 3.5h6L17.5 8v11a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2z"/><path d="M12.8 3.7V8.2h4.5"/></svg>',
+};
+
+function inboxKind(name) {
+  const m = /\.([a-z0-9]+)$/i.exec(name);
+  const e = m ? m[1].toLowerCase() : "";
+  if (["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "svg", "avif", "tiff", "ico"].includes(e)) return "img";
+  if (["mp4", "mov", "mkv", "avi", "webm", "m4v", "flv", "wmv"].includes(e)) return "vid";
+  if (["mp3", "wav", "flac", "aac", "ogg", "m4a", "opus", "wma"].includes(e)) return "aud";
+  if (["zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "dmg", "iso"].includes(e)) return "zip";
+  if (["pdf", "doc", "docx", "pages", "txt", "md", "rtf", "csv", "xls", "xlsx", "ppt", "pptx", "key", "numbers"].includes(e)) return "doc";
+  return "bin";
+}
+
+// 两次点击确认：第一次点亮为「确认删除」，2.6 秒内再点才真删
+let armedDelete = null;
+let lastInboxKey = "";
+
+const inboxKey = (files) =>
+  files.map((f) => `${f.incoming ? "~" : "+"}${f.path} ${f.size} ${f.mtime}`).join("|");
+
 async function loadInbox() {
   try {
     const d = await invoke("inbox_list");
     $("inbox-count").textContent = d.total ? `（${d.total}）` : "";
+    const key = inboxKey(d.files);
+    if (key === lastInboxKey) return; // 列表没变就别动 DOM，保留悬停/确认态
+    lastInboxKey = key;
     const el = $("inbox");
     if (!d.files.length) {
       knownInbox.clear();
+      armedDelete = null;
       el.innerHTML = '<div class="empty">还没有收到文件——在另一台设备上选择本机作为目标发送即可</div>';
       return;
     }
-    el.innerHTML = d.files.map((f) => `
-      <li class="${knownInbox.has(f.path) ? "" : "new"}">
-        <span class="ipath">${esc(f.path)}</span>
-        <span class="isize">${fmtSize(f.size)}</span>
-        <span class="itime">${fmtTime(f.mtime)}</span>
-      </li>`).join("");
-    d.files.forEach((f) => knownInbox.add(f.path));
+    el.innerHTML = d.files.map((f) => {
+      const base = f.path.split("/").pop();
+      const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
+      const k = inboxKind(base);
+      const fresh = !f.incoming && !knownInbox.has(f.path);
+      const sub = f.incoming
+        ? `接收中 · 已收 ${fmtSize(f.size)}`
+        : `${dir ? esc(dir) + " · " : ""}${fmtSize(f.size)} · ${fmtTime(f.mtime)}`;
+      const del = f.incoming ? "" :
+        `<button class="idel${armedDelete === f.path ? " arm" : ""}" data-path="${esc(f.path)}"
+           title="删除" aria-label="删除 ${esc(base)}">${armedDelete === f.path ? "确认删除" : "✕"}</button>`;
+      return `<li class="${f.incoming ? "in " : ""}${fresh ? "new" : ""}" title="${esc(f.path)}">
+        <span class="itic k-${k}">${IN_ICONS[k]}</span>
+        <span class="imeta"><span class="iname">${esc(base)}</span><span class="isub">${sub}</span></span>${del}
+      </li>`;
+    }).join("");
+    d.files.forEach((f) => { if (!f.incoming) knownInbox.add(f.path); });
+    if (armedDelete && !d.files.some((f) => f.path === armedDelete)) armedDelete = null;
   } catch (_) { /* receiver dir may not exist yet */ }
 }
 
@@ -661,6 +704,35 @@ function wire() {
   };
   $("btn-token-save").onclick = saveReceiverToken;
   $("rx-token").addEventListener("keydown", (e) => { if (e.key === "Enter") saveReceiverToken(); });
+  // 收件箱删除：事件委托挂在列表上（列表 3 秒整体重绘）
+  $("inbox").addEventListener("click", async (e) => {
+    const btn = e.target.closest(".idel");
+    if (!btn) return;
+    const p = btn.dataset.path;
+    if (armedDelete !== p) {
+      armedDelete = p;
+      btn.classList.add("arm");
+      btn.textContent = "确认删除";
+      setTimeout(() => {
+        if (armedDelete === p) {
+          armedDelete = null;
+          btn.classList.remove("arm");
+          btn.textContent = "✕";
+        }
+      }, 2600);
+      return;
+    }
+    armedDelete = null;
+    btn.disabled = true;
+    try {
+      await invoke("inbox_delete", { path: p });
+      toast(`已删除 ${p.split("/").pop()}`);
+    } catch (err) {
+      toast(String(err), "err");
+    }
+    lastInboxKey = "";
+    loadInbox();
+  });
   $("btn-pick").onclick = async () => {
     try {
       const r = await invoke("pick_files");

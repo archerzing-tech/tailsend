@@ -72,13 +72,18 @@ pub async fn set_receiver_token(
 }
 
 #[tauri::command]
-pub async fn pick_files() -> Result<Vec<String>, String> {
+pub async fn pick_files(window: tauri::WebviewWindow) -> Result<Vec<String>, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     return Err("移动端请使用「选择文件（界面）」按钮".to_string());
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        Ok(tauri::async_runtime::spawn_blocking(|| {
-            rfd::FileDialog::new().set_title("选择要发送的文件").pick_files()
+        // Parent the panel to our window: an orphan NSOpenPanel appears late,
+        // behind other apps, and steals focus slowly on macOS.
+        Ok(tauri::async_runtime::spawn_blocking(move || {
+            rfd::FileDialog::new()
+                .set_title("选择要发送的文件")
+                .set_parent(&window)
+                .pick_files()
         })
         .await
         .map_err(|e| e.to_string())?
@@ -88,13 +93,16 @@ pub async fn pick_files() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub async fn pick_folders() -> Result<Vec<String>, String> {
+pub async fn pick_folders(window: tauri::WebviewWindow) -> Result<Vec<String>, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     return Err("移动端不支持文件夹选择".to_string());
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        Ok(tauri::async_runtime::spawn_blocking(|| {
-            rfd::FileDialog::new().set_title("选择要发送的文件夹").pick_folders()
+        Ok(tauri::async_runtime::spawn_blocking(move || {
+            rfd::FileDialog::new()
+                .set_title("选择要发送的文件夹")
+                .set_parent(&window)
+                .pick_folders()
         })
         .await
         .map_err(|e| e.to_string())?
@@ -228,6 +236,37 @@ struct InboxEntry {
     path: String,
     size: u64,
     mtime: u64,
+    #[serde(default)]
+    incoming: bool,
+}
+
+/// A `.tspart-*`/`.part-*` temp file back to its original name and relative dir.
+/// Returns None for names that are not receiver temp files.
+fn strip_temp_suffix(rel: &str) -> Option<String> {
+    let (dir, fname) = match rel.rsplit_once('/') {
+        Some((d, f)) => (Some(d), f),
+        None => (None, rel),
+    };
+    let cut = match fname.rfind(".tspart-").or_else(|| fname.rfind(".part-")) {
+        Some(i) => i,
+        None => {
+            return fname
+                .ends_with(".part")
+                .then(|| fname.trim_end_matches(".part").to_string())
+                .map(|base| match dir {
+                    Some(d) => format!("{d}/{base}"),
+                    None => base,
+                });
+        }
+    };
+    let base = &fname[..cut];
+    if base.is_empty() {
+        return None;
+    }
+    Some(match dir {
+        Some(d) => format!("{d}/{base}"),
+        None => base.to_string(),
+    })
 }
 
 #[tauri::command]
@@ -236,15 +275,22 @@ pub async fn inbox_list(state: tauri::State<'_, AppState>) -> Result<serde_json:
     tauri::async_runtime::spawn_blocking(move || {
         let mut out: Vec<InboxEntry> = vec![];
         let mut total = 0usize;
+        // (rel path, size, mtime, incoming) — in-flight temps collapse onto the
+        // final name so a receiving file shows up once, growing live.
+        let mut incoming: std::collections::HashMap<String, InboxEntry> =
+            std::collections::HashMap::new();
         for e in walkdir::WalkDir::new(&dir).into_iter().filter_map(|r| r.ok()) {
             if !e.file_type().is_file() {
                 continue;
             }
             let fname = e.file_name().to_string_lossy();
-            if fname.ends_with(".part") || fname.contains(".part-") || fname.contains(".tspart-") {
-                continue;
-            }
+            let is_incoming = fname.ends_with(".part") || netcore::is_temp_name(&fname);
             let rel = e.path().strip_prefix(&dir).unwrap_or(e.path());
+            let rel = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().to_string())
+                .collect::<Vec<_>>()
+                .join("/");
             let (size, mtime) = match e.metadata() {
                 Ok(m) => (
                     m.len(),
@@ -256,19 +302,70 @@ pub async fn inbox_list(state: tauri::State<'_, AppState>) -> Result<serde_json:
                 ),
                 Err(_) => (0, 0),
             };
+            if is_incoming {
+                let shown = match strip_temp_suffix(&rel) {
+                    Some(s) => s,
+                    None => rel.clone(),
+                };
+                let slot = incoming.entry(shown).or_insert(InboxEntry {
+                    path: rel.clone(),
+                    size: 0,
+                    mtime: 0,
+                    incoming: true,
+                });
+                slot.size += size; // parallel chunks land in separate temps
+                slot.mtime = slot.mtime.max(mtime);
+                continue;
+            }
+            total += 1;
             out.push(InboxEntry {
-                path: rel
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().to_string())
-                    .collect::<Vec<_>>()
-                    .join("/"),
+                path: rel,
                 size,
                 mtime,
+                incoming: false,
             });
-            total += 1;
         }
+        let mut inc: Vec<InboxEntry> = incoming.into_values().collect();
+        total += inc.len();
+        inc.sort_by(|a, b| b.mtime.cmp(&a.mtime));
         out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-        Ok(serde_json::json!({ "total": total, "files": out.into_iter().take(200).collect::<Vec<_>>() }))
+        let mut files = inc;
+        files.extend(out);
+        Ok(serde_json::json!({ "total": total, "files": files.into_iter().take(200).collect::<Vec<_>>() }))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn inbox_delete(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+    let dir = state.recv.lock().unwrap().save_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = std::path::Path::new(&path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // Receivers only ever write temp names — a temp means some upload is
+        // still streaming into it, so refuse rather than yank it mid-flight.
+        if netcore::is_temp_name(&base) || path.ends_with(".part") {
+            return Err("文件还在接收中，暂时不能删除".into());
+        }
+        let full = netcore::safe_join(&dir, &path)?;
+        let meta = std::fs::symlink_metadata(&full).map_err(|e| format!("{path}: {e}"))?;
+        if meta.is_dir() {
+            std::fs::remove_dir_all(&full).map_err(|e| e.to_string())?;
+            return Ok(());
+        }
+        std::fs::remove_file(&full).map_err(|e| e.to_string())?;
+        // Prune now-empty parent folders (a received directory leaves husks).
+        let mut p = full.parent();
+        while let Some(d) = p {
+            if d == dir || std::fs::remove_dir(d).is_err() {
+                break;
+            }
+            p = d.parent();
+        }
+        Ok(())
     })
     .await
     .map_err(|e| e.to_string())?
