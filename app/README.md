@@ -65,9 +65,15 @@ npm run tauri build    # 出安装包：dmg / msi / deb / AppImage
 ```bash
 # Android（需 ANDROID_HOME + NDK + JDK 17；工程已 init 过，gen/android 就绪）
 npm run tauri android dev                    # 连着手机/模拟器直接跑
+
+# release 签名包（体积小，推荐）：先指定 keystore（gen/android 已配好从环境变量读取）
+export TAURI_SIGNING_KEYSTORE_FILE="$HOME/.tailsend/release.keystore"
+export TAURI_SIGNING_KEYSTORE_PASSWORD=…   TAURI_SIGNING_KEY_ALIAS=tailsend   TAURI_SIGNING_KEY_PASSWORD=…
+npm run tauri android build -- --target aarch64 --apk   # armv8（64 位）；换成 armv7 出 32 位包
+# 产物在 src-tauri/gen/android/app/build/outputs/apk/ 下，已签名可直接安装
+
+# 不设上面变量时可出 debug 包（体积大，debug 签名，可直接安装）：
 npm run tauri android build -- --target aarch64 --apk --debug
-# 产物：src-tauri/gen/android/app/build/outputs/apk/ 下的 *-debug.apk（debug 签名，可直接安装）
-# 不加 --debug 出的是未签名 release 包，安装前需自行 zipalign + apksigner
 
 # iOS（需 macOS + Xcode）
 npm run tauri ios init

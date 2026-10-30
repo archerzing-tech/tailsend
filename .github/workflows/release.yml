@@ -69,7 +69,7 @@ jobs:
           java-version: 17
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android
+          targets: aarch64-linux-android,armv7-linux-androideabi
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: app/src-tauri
@@ -86,19 +86,53 @@ jobs:
         run: npx tauri android init
       - name: Pin minSdkVersion (Android 10+ must stay supported)
         run: sed -i 's/minSdk = [0-9][0-9]*/minSdk = 24/' app/src-tauri/gen/android/app/build.gradle.kts
-      - name: Build arm64 APK
-        working-directory: app
-        run: npx tauri android build --target aarch64 --apk --debug
-      - name: Stage APK
+      - name: Restore signing keystore
+        run: echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > "$RUNNER_TEMP/tailsend.keystore"
+      - name: Configure release signing
         run: |
-          apk=$(find app/src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
+          G=app/src-tauri/gen/android/app/build.gradle.kts
+          sed -i 's/^    buildTypes {/    signingConfigs {\n        create("release") {\n            val store = System.getenv("TAURI_SIGNING_KEYSTORE_FILE")\n            if (store != null) {\n                storeFile = file(store)\n                storePassword = System.getenv("TAURI_SIGNING_KEYSTORE_PASSWORD")\n                keyAlias = System.getenv("TAURI_SIGNING_KEY_ALIAS")\n                keyPassword = System.getenv("TAURI_SIGNING_KEY_PASSWORD")\n            }\n        }\n    }\n\n    buildTypes {/' $G
+          sed -i 's/^        getByName("release") {/        getByName("release") {\n            if (System.getenv("TAURI_SIGNING_KEYSTORE_FILE") != null) {\n                signingConfig = signingConfigs.getByName("release")\n            }/' $G
+          grep -q signingConfigs $G && echo "signing config injected"
+      - name: Build armv8 (arm64-v8a) APK
+        working-directory: app
+        env:
+          TAURI_SIGNING_KEYSTORE_FILE: ${{ runner.temp }}/tailsend.keystore
+          TAURI_SIGNING_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          TAURI_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          TAURI_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          rm -rf src-tauri/gen/android/app/build/outputs/apk
+          npx tauri android build --target aarch64 --apk
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
           echo "found: $apk"
-          cp "$apk" "Tailsend-${{ github.ref_name }}-android-arm64.apk"
+          cp "$apk" "Tailsend-${{ github.ref_name }}-android-armv8.apk"
+      - name: Build armv7 (armeabi-v7a) APK
+        working-directory: app
+        env:
+          TAURI_SIGNING_KEYSTORE_FILE: ${{ runner.temp }}/tailsend.keystore
+          TAURI_SIGNING_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          TAURI_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          TAURI_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          rm -rf src-tauri/gen/android/app/build/outputs/apk
+          npx tauri android build --target armv7 --apk
+          apk=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
+          echo "found: $apk"
+          cp "$apk" "Tailsend-${{ github.ref_name }}-android-armv7.apk"
+      - name: Verify signatures
+        run: |
+          APKSIGNER=$(ls "$ANDROID_HOME/build-tools/"*/apksigner | sort | tail -1)
+          $APKSIGNER verify "Tailsend-${{ github.ref_name }}-android-armv8.apk"
+          $APKSIGNER verify "Tailsend-${{ github.ref_name }}-android-armv7.apk"
+          echo "both APKs signed"
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: Tailsend-*.apk
-      - name: Upload to draft release
+          path: |
+            Tailsend-*-android-armv8.apk
+            Tailsend-*-android-armv7.apk
+      - name: Upload to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ github.ref_name }}" "Tailsend-${{ github.ref_name }}-android-arm64.apk" --clobber
+        run: gh release upload "${{ github.ref_name }}" "Tailsend-${{ github.ref_name }}-android-armv8.apk" "Tailsend-${{ github.ref_name }}-android-armv7.apk" --clobber
