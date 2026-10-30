@@ -756,15 +756,18 @@ button.ghost.on {
 @media (max-width: 760px) {
   .top, main { padding-left: 14px; padding-right: 14px; }
   .grid { grid-template-columns: 1fr; }
-  .statusbar { width: 100%; justify-content: space-between; flex-wrap: wrap; row-gap: 2px; }
-  .seg { max-width: 100%; min-width: 0; }
+  .statusbar { width: 100%; flex-wrap: wrap; row-gap: 1px; }
+  .statusbar .sep { display: none; } /* 换行后分隔竖条会悬在行尾，像杂线 */
+  .seg { max-width: 100%; min-width: 0; padding: 4px 8px; }
   .drop { flex-wrap: wrap; row-gap: 10px; padding: 11px 12px; gap: 10px; }
   .drop-hint { display: none; }
   .drop-btns { flex: 1 1 100%; justify-content: flex-start; }
+  .drop-btns button { flex: 1; white-space: nowrap; } /* 等宽三键，对齐 */
   .inbox .idel { opacity: 1; }
   .sendbar { flex-wrap: wrap; }
   .send { flex: 1; }
-  .linkstrip .node { max-width: 12ch; }
+  /* 目标已经在 targetbar 里了，动画链路条在手机上纯属重复 */
+  .linkstrip { display: none; }
   /* Touch targets: keep the delete affordance visible, and keep inputs at
      16px so iOS Safari doesn't zoom the page on focus. */
   .peer .fx-del { opacity: 1; }

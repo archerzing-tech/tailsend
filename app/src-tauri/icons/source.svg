@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="lg" gradientUnits="userSpaceOnUse" x1="330" y1="320" x2="780" y2="720">
+      <stop offset="0" stop-color="#4ed0ff" />
+      <stop offset="1" stop-color="#2e5bf0" />
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="#ffffff" />
+  <g transform="translate(-64, 35)">
+    <path d="M 445 505 L 302 632 L 462 672 Z" fill="#2450c8" />
+    <path d="M 748 455 C 735 372 668 315 590 318 C 505 322 448 385 438 470 C 434 508 428 546 412 580 C 405 595 396 609 388 620 C 410 656 472 690 548 690 C 650 688 722 620 748 535 C 756 508 752 480 748 455 Z" fill="url(#lg)" />
+    <path d="M 470 522 C 496 450 586 438 639 488 C 601 568 521 598 471 568 C 459 550 461 536 470 522 Z" fill="#1c3fae" opacity=".92" />
+    <path d="M 745 398 L 838 442 L 745 488 Z" fill="#ffb13d" stroke="#ffb13d" stroke-width="26" stroke-linejoin="round" />
+    <circle cx="652" cy="392" r="40" fill="#ffffff" />
+    <circle cx="663" cy="397" r="19" fill="#101a2c" />
+    <path d="M 562 318 Q 576 274 620 264 Q 600 298 596 330 Q 576 327 562 318 Z" fill="#2450c8" />
+  </g>
+</svg>

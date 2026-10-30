@@ -13,6 +13,7 @@ pub fn run() {
             commands::get_status,
             commands::list_peers,
             commands::ping_peer,
+            commands::discover_peers,
             commands::restart_receiver,
             commands::set_receiver_token,
             commands::pick_files,

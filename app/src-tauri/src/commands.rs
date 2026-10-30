@@ -4,6 +4,7 @@ use crate::netcore::{self, BatchDoneEvt, Entry, FileDoneEvt, Sink, DATA_CAP};
 use crate::state::{AppState, Slot};
 use base64::Engine as _;
 use serde::Serialize;
+use serde_json::json;
 
 #[tauri::command]
 pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
@@ -44,6 +45,55 @@ pub async fn ping_peer(
     let token = state.recv.lock().unwrap().token.clone();
     let p = netcore::ping(&addr, &token).await?;
     Ok(PeerPing { online: true, name: p.name, version: p.version, your_ip: p.your_ip })
+}
+
+/// Mobile node discovery: ask reachable receivers (favorites, usually a NAS)
+/// for their `tailscale status` view and merge everything into one list.
+/// Targets are literal addresses — this must work without a local CLI.
+#[tauri::command]
+pub async fn discover_peers(
+    state: tauri::State<'_, AppState>,
+    targets: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let token = state.recv.lock().unwrap().token.clone();
+    let mut own_ip = String::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut peers: Vec<serde_json::Value> = Vec::new();
+    for t in targets {
+        let (ip, port) = match discovery::find_target(&t, netcore::DEFAULT_PORT).await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let addr = format!("{ip}:{port}");
+        let Ok(ping) = netcore::ping(&addr, &token).await else {
+            continue; // unreachable source, try the next one
+        };
+        if own_ip.is_empty() {
+            own_ip = ping.your_ip.clone().unwrap_or_default();
+        }
+        let Ok(list) = netcore::fetch_peers(&addr, &token).await else {
+            continue; // older receiver without /api/peers
+        };
+        for p in list {
+            if p.ip.is_empty() || !seen.insert(p.ip.clone()) || p.ip == own_ip {
+                continue;
+            }
+            peers.push(json!({
+                "name": if p.name.is_empty() { p.ip.clone() } else { p.name },
+                "ip": p.ip,
+                "os": p.os,
+                "online": p.online,
+                "via": addr,
+            }));
+        }
+    }
+    peers.sort_by(|a, b| {
+        let on = |v: &serde_json::Value| v["online"].as_bool().unwrap_or(false);
+        on(b).cmp(&on(a)).then_with(|| {
+            a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase())
+        })
+    });
+    Ok(json!({ "self_ip": own_ip, "peers": peers }))
 }
 
 #[tauri::command]

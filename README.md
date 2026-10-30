@@ -32,7 +32,7 @@
    - 电脑：[tailscale.com/download](https://tailscale.com/download)（macOS / Windows / Linux）
    - 手机：应用商店搜 "Tailscale"（Android / iOS）
 2. **桌面端（GUI 和 Go CLI）还需要 `tailscale` 命令行可用**——节点发现靠它执行 `tailscale status --json`。Linux/Windows 装官方包即自带；macOS 若用 App Store 版 Tailscale，Tailsend 会自动找 `/Applications/Tailscale.app` 内置的 CLI，无需额外配置；
-3. **手机端不用 CLI**：装 Tailscale App 并连上（VPN 图标亮起）即可；Tailsend 手机版的节点列表用「收藏目标」代替，首次使用输入对方 IP，之后自动记住并探测在线（安卓版支持 Android 10+，arm64）；
+3. **手机端不用 CLI**：装 Tailscale App 并连上（VPN 图标亮起）即可；手机版会向 tailnet 里任意可达的 Tailsend 接收端（比如常驻的 NAS）询问节点列表，自动发现全网节点——首次使用输入一个对方的 IP 即可起步，之后自动记住并探测在线（安卓版支持 Android 10+，arm64）；
 4. 确认设备间能互通：终端里 `tailscale status` 能看到对方、`ping 100.x.y.z`（对方的 Tailscale IP）能通，Tailsend 就能用。
 
 自建/第三方控制面（如 Headscale）也支持——只要设备上的 Tailscale 客户端正常工作即可，Tailsend 不关心控制面是谁。
@@ -235,6 +235,7 @@ tailsend/
 |---|---|
 | 发现 | `tailscale status --json`（CLI 与 GUI 桌面端共用这一条路径） |
 | 握手 | `GET /api/ping` → `{"ok":true,"name":…,"version":…,"your_ip":…}`（`your_ip` = 调用方在接收端眼里看到的 IP，供移动端得知自己的 tailnet 地址） |
+| 节点代答 | `GET /api/peers` → 本机 `tailscale status` 视角的节点列表。手机端没有 CLI，靠询问任意可达的接收端来发现 tailnet 节点（Go / Rust 接收端都实现，移动端接收器返回 `ok:false`） |
 | 传输（v1） | `POST /api/upload`，multipart；`sender` 字段 + `file` 部分，文件名 = 百分号编码的相对路径 |
 | 传输（v2，分块并行） | `POST /api/upload/begin`（`{name,size,sender}` → `{id,chunk}`）→ `POST /api/upload/chunk`（头 `X-Upload-Id`/`X-Chunk-Index`，原始字节，按偏移写）→ `POST /api/upload/complete`（校验齐全后原子组装）；`/api/upload/abort` 丢弃。发送端遇 404/501 自动回退 v1，新旧版本互通 |
 | 鉴权 | 可选共享密钥，放 `X-Tailsend-Token` 头（v1/v2 全部端点），常数时间比较 |

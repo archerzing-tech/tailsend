@@ -181,6 +181,33 @@ function rememberSelfIp(ip) {
   }
 }
 
+// ---------------------------------------------------------------- discovery
+// Mobile has no `tailscale status`. Receivers that do have the CLI answer
+// /api/peers with their view of the tailnet — so asking any reachable peer
+// (typically an always-on NAS) enumerates the whole tailnet.
+
+const DISC_KEY = "ts.disc.v1";
+
+function loadDisc() {
+  try { return JSON.parse(localStorage.getItem(DISC_KEY)) || []; }
+  catch { return []; }
+}
+
+function storeDisc(list) {
+  try { localStorage.setItem(DISC_KEY, JSON.stringify(list.slice(0, 64))); }
+  catch { /* private mode */ }
+}
+
+async function discoverViaPeers() {
+  // Only nodes whose receiver just answered can tell us anything.
+  const sources = [...savedOnline.entries()].filter(([, st]) => st.online).map(([addr]) => addr);
+  if (!sources.length) return;
+  try {
+    const d = await invoke("discover_peers", { targets: sources });
+    if (Array.isArray(d.peers) && d.peers.length) storeDisc(d.peers);
+  } catch { /* older receivers everywhere — favorites still work */ }
+}
+
 async function loadPeers() {
   if (peersLoading) return;
   peersLoading = true;
@@ -209,6 +236,7 @@ async function loadPeers() {
     peers.forEach((p) => { p.recv = undefined; }); // receiver probe pending
     // Merge saved targets, probing the ones discovery can't see (mobile).
     await probeSaved();
+    if (d.error) await discoverViaPeers(); // no local CLI → ask reachable peers
     saved.forEach((t) => {
       const host = hostOf(t.addr);
       const known = peers.find((p) => p.ip === host || p.ip === t.addr);
@@ -227,6 +255,23 @@ async function loadPeers() {
         os: "",
         fqdn: "",
         saved: true,
+      });
+    });
+    // Nodes learned from peers' views (mobile discovery): merged after saved
+    // so a favorite always wins on addr collision; dedup by IP.
+    loadDisc().forEach((n) => {
+      if (!n.ip) return;
+      const known = peers.find((p) => p.ip === n.ip || hostOf(p.ip) === n.ip);
+      if (known) return;
+      peers.push({
+        ip: n.ip,
+        name: n.name || n.ip,
+        online: !!n.online,
+        recv: undefined,
+        os: n.os || "",
+        fqdn: "",
+        saved: false,
+        disc: true,
       });
     });
     peers.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));

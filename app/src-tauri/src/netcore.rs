@@ -89,6 +89,7 @@ pub fn router(cfg: RecvCfg) -> Router {
     Router::new()
         .route("/", get(info))
         .route("/api/ping", get(ping_info))
+        .route("/api/peers", get(peers_info))
         .route("/api/upload", post(upload).layer(DefaultBodyLimit::disable()))
         .route(
             "/api/upload/begin",
@@ -136,6 +137,29 @@ async fn ping_info(
         "your_ip": peer.ip().to_string(),
     }))
     .into_response()
+}
+
+// Peer-list exchange: CLI-less devices (phones) discover the tailnet by
+// asking any reachable receiver for this machine's view of it. Mobile
+// receivers answer ok:false — they cannot run `tailscale status`.
+async fn peers_info(State(cfg): State<RecvCfg>, headers: HeaderMap) -> Response {
+    if !token_ok(&headers, &cfg.token) {
+        return err_json(StatusCode::FORBIDDEN, "invalid or missing token");
+    }
+    match crate::discovery::status().await {
+        Ok((self_info, peers)) => Json(json!({
+            "ok": true,
+            "name": cfg.host,
+            "version": env!("CARGO_PKG_VERSION"),
+            "self_ip": self_info.ip,
+            "peers": peers
+                .iter()
+                .map(|p| json!({ "name": p.name, "ip": p.ip, "os": p.os, "online": p.online }))
+                .collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(e) => Json(json!({ "ok": false, "error": e, "peers": [] })).into_response(),
+    }
 }
 
 async fn upload(State(cfg): State<RecvCfg>, headers: HeaderMap, mut mp: Multipart) -> Response {
@@ -707,6 +731,41 @@ pub async fn ping(addr: &str, token: &str) -> Result<PingInfo, String> {
         Ok(p) => Ok(p),
         Err(_) => Err(format!("{addr} 有响应但不是 Tailsend（HTTP {status}）")),
     }
+}
+
+/// One node as reported by a peer's `/api/peers`.
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct DiscPeer {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub ip: String,
+    #[serde(default)]
+    pub os: String,
+    #[serde(default)]
+    pub online: bool,
+}
+
+// Ask a receiver for its view of the tailnet. Short total timeout: discovery
+// sources are best-effort, a wedged one must not stall the whole refresh.
+pub async fn fetch_peers(addr: &str, token: &str) -> Result<Vec<DiscPeer>, String> {
+    let mut req = ctrl_client().get(format!("http://{addr}/api/peers"));
+    req = req.timeout(std::time::Duration::from_secs(10));
+    if !token.is_empty() {
+        req = req.header("X-Tailsend-Token", token);
+    }
+    let resp = req.send().await.map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    #[derive(serde::Deserialize)]
+    struct P {
+        #[serde(default)]
+        peers: Vec<DiscPeer>,
+    }
+    let v: P = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(v.peers)
 }
 
 #[derive(Clone)]

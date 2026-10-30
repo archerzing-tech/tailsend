@@ -117,6 +117,31 @@ func cmdReceive(args []string) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "name": host, "version": version, "dir": saveDir, "your_ip": peerIP})
 	})
+	mux.HandleFunc("/api/peers", func(w http.ResponseWriter, r *http.Request) {
+		if !authed(r, *token) {
+			writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "invalid or missing token"})
+			return
+		}
+		// Peer-list exchange: CLI-less devices (phones) discover the tailnet
+		// by asking any reachable receiver for this machine's view of it.
+		st, err := tailscaleStatus()
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": err.Error(), "peers": []any{}})
+			return
+		}
+		out := make([]map[string]any, 0, len(st.Peer))
+		for _, p := range peerNodes(st) {
+			ip := ""
+			if len(p.IPs) > 0 {
+				ip = p.IPs[0]
+			}
+			out = append(out, map[string]any{"name": p.HostName, "ip": ip, "os": p.OS, "online": p.Online})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok": true, "name": host, "version": version,
+			"self_ip": primaryIP(selfNode(st).IPs), "peers": out,
+		})
+	})
 	mux.HandleFunc("/api/upload", func(w http.ResponseWriter, r *http.Request) {
 		handleUpload(w, r, saveDir, *token, *max)
 	})
