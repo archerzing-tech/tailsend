@@ -134,6 +134,7 @@ pub async fn start_receiver(state: &AppState) -> Result<(), String> {
             token: rs.token.clone(),
             max: rs.max,
             host: crate::netcore::host_name(),
+            uploads: std::sync::Arc::default(),
         }
     };
     let serve = axum::serve(

@@ -48,7 +48,9 @@ tailsend send ──HTTP:4782──▶ tailsend receive
 
 - 通过 `tailscale status --json` 发现节点，无需手动记 IP；
 - 传输就是 tailnet 内的普通 HTTP，加密由 Tailscale（WireGuard）保证，不用配证书；
-- 文件流式传输（`multipart` 流），内存占用与文件大小无关，GB 级文件也没问题；
+- **分块并行上传**：大文件切成 4 MiB 块、4 路并发传输、接收端按偏移落盘最后原子组装（对旧版接收端自动回退整文件上传）；
+- **1:N 发送**（界面端）：可多选目标，文件依次发给每个选中的节点；接收端天然并发，可同时接收多个/多方传来的文件；
+- 文件流式传输（multipart 流），内存占用与文件大小无关，GB 级文件也没问题；
 - 接收端默认只绑定 Tailscale IP（`100.x.x.x`），局域网里的其他设备摸不到它。
 
 ## 安装
@@ -232,6 +234,7 @@ tailsend/
 |---|---|
 | 发现 | `tailscale status --json`（CLI 与 GUI 桌面端共用这一条路径） |
 | 握手 | `GET /api/ping` → `{"ok":true,"name":…,"version":…,"your_ip":…}`（`your_ip` = 调用方在接收端眼里看到的 IP，供移动端得知自己的 tailnet 地址） |
-| 传输 | `POST /api/upload`，multipart；`sender` 字段 + `file` 部分，文件名 = 百分号编码的相对路径 |
-| 鉴权 | 可选共享密钥，放 `X-Tailsend-Token` 头，常数时间比较 |
-| 安全 | 路径清洗（拍平 `../`）、同名自动 `(1)`、`.part` 临时文件 + 原子改名、可限单文件大小 |
+| 传输（v1） | `POST /api/upload`，multipart；`sender` 字段 + `file` 部分，文件名 = 百分号编码的相对路径 |
+| 传输（v2，分块并行） | `POST /api/upload/begin`（`{name,size,sender}` → `{id,chunk}`）→ `POST /api/upload/chunk`（头 `X-Upload-Id`/`X-Chunk-Index`，原始字节，按偏移写）→ `POST /api/upload/complete`（校验齐全后原子组装）；`/api/upload/abort` 丢弃。发送端遇 404/501 自动回退 v1，新旧版本互通 |
+| 鉴权 | 可选共享密钥，放 `X-Tailsend-Token` 头（v1/v2 全部端点），常数时间比较 |
+| 安全 | 路径清洗（拍平 `../`）、同名自动 `(1)`、`.part`/`.tspart-*` 临时文件 + 原子改名、可限单文件大小 |

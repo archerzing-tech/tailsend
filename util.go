@@ -1,12 +1,18 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// defaultChunkSize is the v2 chunk size both sides agree on; the receiver's
+// begin reply may override it.
+const defaultChunkSize = 4 << 20 // 4 MiB
 
 func fatal(format string, a ...any) {
 	fmt.Fprintf(os.Stderr, "tailsend: "+format+"\n", a...)
@@ -82,4 +88,12 @@ func uniquePath(dest string) string {
 			return cand
 		}
 	}
+}
+
+// randomHex returns n random bytes as a lowercase hex string, used for upload
+// ids and unique temp-file suffixes.
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b) // crypto/rand.Read never returns an error
+	return hex.EncodeToString(b)
 }

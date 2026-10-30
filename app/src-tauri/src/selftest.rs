@@ -65,6 +65,7 @@ async fn serve(args: &[String]) -> Result<(), i32> {
         token: f.token.unwrap_or_default(),
         max: 0,
         host: netcore::host_name(),
+        uploads: std::sync::Arc::default(),
     };
     let addr = format!("{bind}:{port}");
     let ln = match tokio::net::TcpListener::bind(&addr).await {

@@ -221,7 +221,8 @@ pub async fn inbox_list(state: tauri::State<'_, AppState>) -> Result<serde_json:
             if !e.file_type().is_file() {
                 continue;
             }
-            if e.file_name().to_string_lossy().ends_with(".part") {
+            let fname = e.file_name().to_string_lossy();
+            if fname.ends_with(".part") || fname.contains(".part-") || fname.contains(".tspart-") {
                 continue;
             }
             let rel = e.path().strip_prefix(&dir).unwrap_or(e.path());
