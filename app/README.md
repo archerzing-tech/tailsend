@@ -30,7 +30,8 @@ Tailsend 依赖 [Tailscale](https://tailscale.com) 组网传输，本身不自�
 | 平台 | 状态 | 说明 |
 |---|---|---|
 | macOS / Windows / Linux | ✅ 已验证 | 拖拽 + 原生文件选择器，无大小限制 |
-| Android / iOS | 🧱 已适配 | 构建需各自工具链（见下） |
+| Android 10+ | 🧱 已适配 | arm64 APK，minSdk 24；构建需工具链（见下） |
+| iOS | 🧱 已适配 | 构建需 macOS + Xcode（见下） |
 
 两端差异（移动端）：
 

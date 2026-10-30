@@ -84,6 +84,8 @@ jobs:
       - name: Generate Android project
         working-directory: app
         run: npx tauri android init
+      - name: Pin minSdkVersion (Android 10+ must stay supported)
+        run: sed -i 's/minSdk = [0-9][0-9]*/minSdk = 24/' app/src-tauri/gen/android/app/build.gradle.kts
       - name: Build arm64 APK
         working-directory: app
         run: npx tauri android build --target aarch64 --apk

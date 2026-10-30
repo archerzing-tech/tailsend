@@ -24,7 +24,7 @@
    - 电脑：[tailscale.com/download](https://tailscale.com/download)（macOS / Windows / Linux）
    - 手机：应用商店搜 "Tailscale"（Android / iOS）
 2. **桌面端（GUI 和 Go CLI）还需要 `tailscale` 命令行可用**——节点发现靠它执行 `tailscale status --json`。Linux/Windows 装官方包即自带；macOS 若用 App Store 版 Tailscale，Tailsend 会自动找 `/Applications/Tailscale.app` 内置的 CLI，无需额外配置；
-3. **手机端不用 CLI**：装 Tailscale App 并连上（VPN 图标亮起）即可；Tailsend 手机版的节点列表用「收藏目标」代替，首次使用输入对方 IP，之后自动记住并探测在线；
+3. **手机端不用 CLI**：装 Tailscale App 并连上（VPN 图标亮起）即可；Tailsend 手机版的节点列表用「收藏目标」代替，首次使用输入对方 IP，之后自动记住并探测在线（安卓版支持 Android 10+，arm64）；
 4. 确认设备间能互通：终端里 `tailscale status` 能看到对方、`ping 100.x.y.z`（对方的 Tailscale IP）能通，Tailsend 就能用。
 
 自建/第三方控制面（如 Headscale）也支持——只要设备上的 Tailscale 客户端正常工作即可，Tailsend 不关心控制面是谁。
