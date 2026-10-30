@@ -46,6 +46,21 @@ fn client() -> &'static reqwest::Client {
     })
 }
 
+// Chunk uploads can legitimately crawl (DERP relay, phone on weak Wi-Fi), so
+// this client only guards the connection; the idle timeout is generous — a
+// slow-but-alive transfer must never be killed by our own stack.
+fn chunk_client() -> &'static reqwest::Client {
+    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(10))
+            .read_timeout(Duration::from_secs(300))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .expect("reqwest client")
+    })
+}
+
 // Control-plane client (begin/complete/abort): tiny envelopes, so a total
 // deadline is safe here.
 fn ctrl_client() -> &'static reqwest::Client {
@@ -1099,7 +1114,7 @@ async fn upload_chunk_task(
         match read.await {
             Err(e) => err = format!("读取 {} 失败：{e}", rel),
             Ok(_) => {
-                let mut req = client()
+                let mut req = chunk_client()
                     .post(format!("http://{addr}/api/upload/chunk"))
                     .header("X-Upload-Id", &id)
                     .header("X-Chunk-Index", ci.to_string())
@@ -1108,7 +1123,7 @@ async fn upload_chunk_task(
                     req = req.header("X-Tailsend-Token", &token);
                 }
                 match req.send().await {
-                    Err(e) => err = format!("发送分块 {ci} 失败：{e}"),
+                    Err(e) => err = format!("发送分块 {ci} 失败：{e}（对方连接中断或不稳定）"),
                     Ok(resp) => {
                         let status = resp.status();
                         let parsed = resp

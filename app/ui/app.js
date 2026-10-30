@@ -525,17 +525,35 @@ function removeItem(id) {
 
 function renderQueue() {
   const el = $("queue");
-  el.innerHTML = items.map((i) => `
-    <li class="qi ${i.status}" data-id="${i.id}">
+  el.innerHTML = items.map((i) => {
+    const k = fileKind(i.rel);
+    return `
+    <li class="qi ${i.status}" data-id="${i.id}" title="${esc(i.rel)}">
+      <span class="itic k-${k}" aria-hidden="true">${FILE_ICONS[k]}</span>
       <span class="fmeta">
         <span class="frel">${esc(i.rel)}</span>
         <span class="fbar"><i style="width:${i.size ? (100 * i.loaded / i.size).toFixed(1) : 0}%"></i></span>
       </span>
       <span class="fsize">${i.status === "sending" ? fmtSize(i.loaded) + " / " : ""}${fmtSize(i.size)}</span>
       <span class="fstate">${i.status === "done" ? "✓" : i.status === "error" ? "✗" : i.status === "sending" ? "↑" : ""}</span>
-      ${i.status !== "sending" ? `<button class="fx" data-x="${i.id}" title="移除">✕</button>` : ""}
-    </li>`).join("");
+      ${!sending && i.status === "error" ? `<button class="fx retry" data-retry="${i.id}" title="重新发送">↻</button>` : ""}
+      ${!sending && i.status !== "sending" ? `<button class="fx" data-x="${i.id}" title="移除">✕</button>` : ""}
+    </li>`;
+  }).join("");
   el.querySelectorAll(".fx").forEach((b) => { b.onclick = () => removeItem(+b.dataset.x); });
+  el.querySelectorAll(".fx.retry").forEach((b) => {
+    b.onclick = () => {
+      const it = items.find((x) => x.id === +b.dataset.retry);
+      if (!it) return;
+      it.status = "ready";
+      it.loaded = 0;
+      it.okN = 0;
+      it.tried = 0;
+      it.error = null;
+      renderQueue();
+      updateSendBtn();
+    };
+  });
 }
 
 function updateRow(item) {
@@ -640,6 +658,7 @@ async function send() {
 
   sending = false;
   document.body.classList.remove("sending");
+  renderQueue(); // 恢复各行 ✕（发送期间删除钮整体隐藏）
   updateSendBtn();
   perTarget.forEach((x) => { if (x.ok > 0) saveTarget(x.t.addr, x.t.label); }); // remember where sends succeed
   const bad = perTarget.filter((x) => x.fail > 0).map((x) => x.t.label);
@@ -654,8 +673,8 @@ async function send() {
 
 /* ---------------------------------------------------------------- inbox */
 
-// 类型 → 配色 tile 里的小图标（stroke 线稿，CSS 上色）
-const IN_ICONS = {
+// 类型 → 配色 tile 里的小图标（stroke 线稿，CSS 上色）；收件箱和发送队列共用
+const FILE_ICONS = {
   img: '<svg viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><circle cx="9" cy="10" r="1.6"/><path d="M5.5 17.5l4-4 3.5 3.5 3-3 2.5 2.5"/></svg>',
   vid: '<svg viewBox="0 0 24 24"><rect x="3" y="5.5" width="13" height="13" rx="2.5"/><path d="M16 10l4.5-2.5v9L16 14"/></svg>',
   aud: '<svg viewBox="0 0 24 24"><path d="M9.5 17V6.5l9-2v10.5"/><circle cx="7.2" cy="17.5" r="2.2"/><circle cx="16.2" cy="14.5" r="2.2"/></svg>',
@@ -664,7 +683,7 @@ const IN_ICONS = {
   bin: '<svg viewBox="0 0 24 24"><path d="M7 3.5h6L17.5 8v11a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2V5.5a2 2 0 0 1 2-2z"/><path d="M12.8 3.7V8.2h4.5"/></svg>',
 };
 
-function inboxKind(name) {
+function fileKind(name) {
   const m = /\.([a-z0-9]+)$/i.exec(name);
   const e = m ? m[1].toLowerCase() : "";
   if (["png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "svg", "avif", "tiff", "ico"].includes(e)) return "img";
@@ -699,7 +718,7 @@ async function loadInbox() {
     el.innerHTML = d.files.map((f) => {
       const base = f.path.split("/").pop();
       const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
-      const k = inboxKind(base);
+      const k = fileKind(base);
       const fresh = !f.incoming && !knownInbox.has(f.path);
       const sub = f.incoming
         ? `接收中 · 已收 ${fmtSize(f.size)}`
@@ -708,7 +727,7 @@ async function loadInbox() {
         `<button class="idel${armedDelete === f.path ? " arm" : ""}" data-path="${esc(f.path)}"
            title="删除" aria-label="删除 ${esc(base)}">${armedDelete === f.path ? "确认删除" : "✕"}</button>`;
       return `<li class="${f.incoming ? "in " : ""}${fresh ? "new" : ""}" title="${esc(f.path)}">
-        <span class="itic k-${k}">${IN_ICONS[k]}</span>
+        <span class="itic k-${k}">${FILE_ICONS[k]}</span>
         <span class="imeta"><span class="iname">${esc(base)}</span><span class="isub">${sub}</span></span>${del}
       </li>`;
     }).join("");

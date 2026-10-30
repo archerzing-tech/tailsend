@@ -556,10 +556,13 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
 .qi {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 2px;
+  gap: 11px;
+  padding: 7px 8px;
+  border-radius: 9px;
   border-bottom: 1px solid var(--border-soft);
 }
+
+.qi:hover { background: var(--panel-2); }
 
 .qi .fmeta { flex: 1; min-width: 0; }
 
@@ -588,6 +591,10 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
 }
 
 .qi .fx:hover { color: var(--err); }
+
+.qi .fx.retry { color: var(--accent); }
+
+.qi .fx.retry:hover { color: var(--accent); filter: brightness(1.15); }
 
 /* ---------------------------------------------------------------- sendbar */
 
