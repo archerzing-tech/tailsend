@@ -54,7 +54,7 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: Tailsend ${{ github.ref_name }}
           releaseBody: "下载对应平台的安装包。Android APK 见下方 assets（arm64，debug 签名）。"
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
 
