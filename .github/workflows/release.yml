@@ -88,11 +88,12 @@ jobs:
         run: sed -i 's/minSdk = [0-9][0-9]*/minSdk = 24/' app/src-tauri/gen/android/app/build.gradle.kts
       - name: Build arm64 APK
         working-directory: app
-        run: npx tauri android build --target aarch64 --apk
+        run: npx tauri android build --target aarch64 --apk --debug
       - name: Stage APK
         run: |
-          cp app/src-tauri/gen/android/app/build/outputs/apk/aarch64/debug/app-aarch64-debug.apk \
-             "Tailsend-${{ github.ref_name }}-android-arm64.apk"
+          apk=$(find app/src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -1)
+          echo "found: $apk"
+          cp "$apk" "Tailsend-${{ github.ref_name }}-android-arm64.apk"
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk

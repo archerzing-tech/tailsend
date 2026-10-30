@@ -65,8 +65,9 @@ npm run tauri build    # 出安装包：dmg / msi / deb / AppImage
 ```bash
 # Android（需 ANDROID_HOME + NDK + JDK 17；工程已 init 过，gen/android 就绪）
 npm run tauri android dev                    # 连着手机/模拟器直接跑
-npm run tauri android build -- --target aarch64 --apk   # 出 arm64 APK
-# 产物：src-tauri/gen/android/app/build/outputs/apk/aarch64/debug/app-aarch64-debug.apk
+npm run tauri android build -- --target aarch64 --apk --debug
+# 产物：src-tauri/gen/android/app/build/outputs/apk/ 下的 *-debug.apk（debug 签名，可直接安装）
+# 不加 --debug 出的是未签名 release 包，安装前需自行 zipalign + apksigner
 
 # iOS（需 macOS + Xcode）
 npm run tauri ios init
