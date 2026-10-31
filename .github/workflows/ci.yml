@@ -18,6 +18,10 @@ jobs:
           go build ./...
           go vet ./...
           go test ./...
+      - name: Mobile package compiles for Android
+        # Guards the gomobile-bound tsnet node against breakage on the
+        # platform it ships for; gomobile itself stays a local tool.
+        run: CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./mobile/
 
   rust-core:
     runs-on: ubuntu-24.04

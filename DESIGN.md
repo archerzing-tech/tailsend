@@ -69,6 +69,9 @@ Tailsend 只做两件事：**发送**和**接收**。所有设计围绕这两件
   - **出站冷启动需预热**：全新会话首轮 dial 常在 ~30s 内超时（disco/DERP 路径未热）；对端有任一流量（如 TSMP ping）或重试一轮后即通。产品实现必须带重试与宽松超时（尖刺用 3×30s）。
   - **同 NAT 环境无直连**：本机 ISP 为 CGNAT（en0 即 100.x/23），两节点 hairpin 打洞不成，走 DERP 中继（sfo，RTT ~350ms）。文件传输出中继可用但慢，属可接受 MVP 底线。
   - **调试必须设 `Logf`**：tsnet 默认把内部 disco/derp/netcheck 日志吞进 logtail，不设 `Logf` 则拨号失败完全无迹可查。
+- **P1 Go 侧（2026-10-31）✅**：① `core/` 包承载全部协议引擎——`Receiver{Dir,Token,Max,Host,Version,Gate,Peers,Logf,AdvertiseIP}` 挂任意 `net.Listener`（`Serve/Stop`），`/api/peers` 改注入式 Peers func，发送端进度走 `Progress` 回调；CLI 收缩成壳（flags/TTY prompt/进度渲染），wire 协议零变化。② `mobile/` 包 = tsnet 节点 + core 引擎的 gomobile 绑定面：`NewNode(hostname,dir,version)` → 异步 `Start` → `Status()` JSON 轮询（state: starting/needs_login/running/error）→ `LoginURL()`（从 Logf 行 `go to: https://login.tailscale.com/a/…` 捕获）→ `SetPrompt(Prompt 接口)`（Kotlin 实现，桥到 GUI 确认弹窗）→ `StartReceiver(token,confirm)` → `PingTarget/SendFiles`（JSON 结果）。go.mod 用 `go get -tool` 记录 gobind；root/core 不 import tsnet，CLI 二进制保持 ~10.8MB。
+- **P2（下一步）**：Kotlin 前台服务持 Node 单例（生命周期对齐服务 onStartCommand/onDestroy）+ Tauri Android 插件桥（Rust 命令 ↔ JNI ↔ Node），登录态 needs_login 时 UI 弹浏览器授权。
+- **AAR 产出（已验证，2026-10-31）**：`PATH=$HOME/go/bin:$PATH gomobile bind -target=android -androidapi 24 -o tailsend.aar ./mobile`（go.mod 有 tool gobind；首次全量编译约 4-5 分钟）。产物 ~63MB（4 ABI 各 ~40MB libgojni.so——tsnet 本体大）；接 Kotlin 时 APK 分 ABI 已有，实际进包 arm64+armv7 各 ~40MB，可接受但需在发版说明里注明。生成的 Kotlin 面：`Mobile.newNode(h,d,v)` / `node.status()/loginURL()/ip()/setPrompt(Prompt)/startReceiver(token,confirm)/stopReceiver()/pingTarget()/shutdown()` / `Prompt.ask(sender,count:Long,total:Long,namesJSON)`。
 
 ## 4. 路线
 
@@ -76,5 +79,5 @@ Tailsend 只做两件事：**发送**和**接收**。所有设计围绕这两件
 |---|---|---|
 | P1 | 协议 v3 双端（Go + Rust）+ 测试 | ✅ Go 3c6cd56 / Rust 5fb4020，互操作矩阵 6 场景全过 |
 | P2 | GUI：确认弹窗、等待确认态、确认开关（发送/接收两区待后续迭代） | ✅ 弹窗/开关/等待态已落地 |
-| P3 | tsnet all-in-one（mobile 包 → AAR → Kotlin → 桥 → UI） | ⏳ Phase-0 尖刺 ✅ 2026-10-31（登录/入站/出站三项全通） |
+| P3 | tsnet all-in-one（mobile 包 → AAR → Kotlin → 桥 → UI） | ⏳ P0 尖刺 ✅ + core/ 协议引擎 + mobile/ 节点包 ✅（2026-10-31）；下一步 Kotlin 服务 + Tauri 桥 |
 | P4 | v0.2.0 发布（版本号 6 处 + release notes） | ⏳ |

@@ -25,6 +25,7 @@ type PingResult struct {
 	Name    string `json:"name"`
 	Version string `json:"version"`
 	Dir     string `json:"dir"`
+	Confirm bool   `json:"confirm"` // receiver requires per-transfer approval (v3)
 	Error   string `json:"error"`
 }
 
