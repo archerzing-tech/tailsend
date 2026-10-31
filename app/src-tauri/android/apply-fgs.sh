@@ -52,7 +52,17 @@ if "TailsendReceiverService" not in s:
         "    super.onCreate(savedInstanceState)",
         "    super.onCreate(savedInstanceState)\n"
         "    TailsendReceiverService.start(this)")
-    open(p, "w").write(s)
+if "POST_NOTIFICATIONS" not in s:
+    # Android 13+: notification permission is runtime-granted — ask on first
+    # launch so the receiver's ongoing notification actually shows instead of
+    # silently vanishing behind an ungranted permission.
+    s = s.replace(
+        "    TailsendReceiverService.start(this)",
+        "    TailsendReceiverService.start(this)\n"
+        "    if (android.os.Build.VERSION.SDK_INT >= 33) {\n"
+        "      requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)\n"
+        "    }")
+open(p, "w").write(s)
 PYEOF
 
 # Assertions — a silent miss here would ship an APK without the service.
@@ -60,5 +70,7 @@ MAN="$APP/AndroidManifest.xml"; ACT="$PKG_DIR/MainActivity.kt"
 grep -q 'FOREGROUND_SERVICE_SPECIAL_USE' "$MAN"
 grep -q 'TailsendReceiverService' "$MAN"
 grep -q 'TailsendReceiverService.start(this)' "$ACT"
+grep -q 'POST_NOTIFICATIONS' "$MAN"
+grep -q 'requestPermissions' "$ACT"
 test -f "$PKG_DIR/TailsendReceiverService.kt"
 echo "foreground service applied: $MAN"

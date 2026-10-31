@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -51,11 +53,25 @@ type Node struct {
 	ip           string
 	tailnet      string
 	lastErr      string
+	debugLog     []string // ring buffer of recent tsnet log lines (diagnosis)
 }
+
+// debugKeep bounds the log ring surfaced through Status; tsnet's internal
+// lines are the only window into a failed startup on a phone.
+const debugKeep = 60
 
 // NewNode creates a node named hostname whose login state persists in dir.
 func NewNode(hostname, dir, version string) (*Node, error) {
 	n := &Node{Hostname: hostname, Dir: dir, Version: version, state: "starting"}
+	// Android has no writable /tmp and usually no TMPDIR env either, so any
+	// os.CreateTemp("", …) anywhere in the dependency tree would fail with
+	// "permission denied" — pin it inside our own state dir up front.
+	if dir != "" && os.Getenv("TMPDIR") == "" {
+		tmp := filepath.Join(dir, "tmp")
+		if err := os.MkdirAll(tmp, 0o700); err == nil {
+			os.Setenv("TMPDIR", tmp)
+		}
+	}
 	if err := n.startAsync(); err != nil {
 		return nil, err
 	}
@@ -103,11 +119,18 @@ func (n *Node) startAsync() error {
 	return nil
 }
 
-// logf is the tsnet log sink: state transitions land here, and the login
-// URL (printed by tsnet's auth loop while NeedsLogin) is captured for
+// logf is the tsnet log sink: recent lines land in a ring buffer that
+// Status exposes (debug_log) for on-device diagnosis, and the login URL
+// (printed by tsnet's auth loop while NeedsLogin) is captured for
 // LoginURL(). Line shape: "…go to: https://login.tailscale.com/a/…".
 func (n *Node) logf(format string, a ...any) {
 	line := fmt.Sprintf(format, a...)
+	n.mu.Lock()
+	n.debugLog = append(n.debugLog, line)
+	if len(n.debugLog) > debugKeep {
+		n.debugLog = n.debugLog[len(n.debugLog)-debugKeep:]
+	}
+	n.mu.Unlock()
 	if u, ok := extractAuthURL(line); ok {
 		n.mu.Lock()
 		n.state = "needs_login"
@@ -129,12 +152,14 @@ func (n *Node) Status() string {
 		Tailnet  string `json:"tailnet,omitempty"`
 		Error    string `json:"error,omitempty"`
 		Receiver string `json:"receiver,omitempty"` // "on" once StartReceiver succeeds
+		DebugLog string `json:"debug_log,omitempty"`
 	}{
 		State:    n.state,
 		LoginURL: n.loginURL,
 		Hostname: n.Hostname,
 		Tailnet:  n.tailnet,
 		Error:    n.lastErr,
+		DebugLog: strings.Join(n.debugLog, "\n"),
 	}
 	if n.rcv != nil && n.ln != nil {
 		st.Receiver = "on"

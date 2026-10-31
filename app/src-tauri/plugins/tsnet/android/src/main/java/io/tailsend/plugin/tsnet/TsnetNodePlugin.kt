@@ -107,12 +107,28 @@ class TsnetNodePlugin(private val activity: Activity) : Plugin(activity) {
 
   @Command
   fun status(invoke: Invoke) {
-    invoke.resolve(statusOf(node))
+    val st = statusOf(node)
+    logStatus(st)
+    invoke.resolve(st)
   }
 
   @Command
   fun ensure(invoke: Invoke) {
-    invoke.resolve(statusOf(ensureNode()))
+    val st = statusOf(ensureNode())
+    logStatus(st)
+    invoke.resolve(st)
+  }
+
+  // Mirror node state (incl. the Go-side tsnet log ring) into logcat — the
+  // only practical way to see a failed startup on a phone.
+  private fun logStatus(st: JSObject) {
+    try {
+      val err = st.optString("error", "")
+      val dbg = st.optString("debug_log", "")
+      var msg = "state=${st.optString("state", "?")} ip=${st.optString("ip", "")} error=$err"
+      if (dbg.isNotEmpty()) msg += "\n--- tsnet log ---\n$dbg"
+      android.util.Log.i("TsnetNode", msg)
+    } catch (_: Exception) {}
   }
 
   @Command
