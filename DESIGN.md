@@ -70,7 +70,13 @@ Tailsend 只做两件事：**发送**和**接收**。所有设计围绕这两件
   - **同 NAT 环境无直连**：本机 ISP 为 CGNAT（en0 即 100.x/23），两节点 hairpin 打洞不成，走 DERP 中继（sfo，RTT ~350ms）。文件传输出中继可用但慢，属可接受 MVP 底线。
   - **调试必须设 `Logf`**：tsnet 默认把内部 disco/derp/netcheck 日志吞进 logtail，不设 `Logf` 则拨号失败完全无迹可查。
 - **P1 Go 侧（2026-10-31）✅**：① `core/` 包承载全部协议引擎——`Receiver{Dir,Token,Max,Host,Version,Gate,Peers,Logf,AdvertiseIP}` 挂任意 `net.Listener`（`Serve/Stop`），`/api/peers` 改注入式 Peers func，发送端进度走 `Progress` 回调；CLI 收缩成壳（flags/TTY prompt/进度渲染），wire 协议零变化。② `mobile/` 包 = tsnet 节点 + core 引擎的 gomobile 绑定面：`NewNode(hostname,dir,version)` → 异步 `Start` → `Status()` JSON 轮询（state: starting/needs_login/running/error）→ `LoginURL()`（从 Logf 行 `go to: https://login.tailscale.com/a/…` 捕获）→ `SetPrompt(Prompt 接口)`（Kotlin 实现，桥到 GUI 确认弹窗）→ `StartReceiver(token,confirm)` → `PingTarget/SendFiles`（JSON 结果）。go.mod 用 `go get -tool` 记录 gobind；root/core 不 import tsnet，CLI 二进制保持 ~10.8MB。
-- **P2（下一步）**：Kotlin 前台服务持 Node 单例（生命周期对齐服务 onStartCommand/onDestroy）+ Tauri Android 插件桥（Rust 命令 ↔ JNI ↔ Node），登录态 needs_login 时 UI 弹浏览器授权。
+- **P2 Kotlin + Tauri 桥（2026-10-31）**：桥 = 本仓库内插件 crate `app/src-tauri/plugins/tsnet/`（tauri-plugin-tsnet，`links` + build.rs `tauri_plugin::Builder.android_path("android")`，CLI 靠 build 脚本输出的 `cargo:android_library_path` 自动把模块注入 gen/android 的 tauri.settings.gradle 与 app/tauri.build.gradle.kts——无需手工 patch gradle）。
+  - **Kotlin** `TsnetNodePlugin`（@TauriPlugin，按方法名路由 `@Command`）：companion 持进程级 `Mobile.Node` 单例（ survives webview 重载；前台通知仍归 TailsendReceiverService）；`ensure` 对 error 态节点 shutdown 重建；Prompt.ask 挂 35s CompletableFuture（>Go 30s deadline，超时裁决权留给 Go）；登录跳转 `open_login` 用 ACTION_VIEW intent。
+  - **Rust**：`TsnetNode<R>` managed state + `run_mobile_plugin_async`；命令 `node_status/ensure/start_receiver/stop_receiver/pending/respond/ping_target/send_files/open_login`；consent 中继 = 插件 setup 里 400ms 轮询 Kotlin pending → emit 同名 `incoming-request` 事件（payload files 无 size，UI fmtSize 天然容忍），`request_respond` 对非 Rust 的 "n…" id 兜底转发 node.respond——UI 确认弹窗零改动。
+  - **发送嫁接（零 UI 改动）**：node running 时 `send_data_begin` 检测到后把 JS 字节暂存 app_data/send-tmp 临时文件（Slot::NodeTemp），`send_data_end` 调 Go SendFiles（consent+上传都由 Go 完成）后删临时文件；`request_send` 预检跳过（Go 自己 request）。node 模式 ping 走 `node_ping_target`（Go PingResult 无 your_ip）。前提：`core.SetDialContext(s.Dial)` 把发送引擎的三个 http client 全部改走 tsnet userspace dialer（普通 net dialer 无 VPN 打不通 100.x——手机没有系统 VPN）。
+  - **收件箱合并**：Android save_dir 钉到 app_data/Tailsend（dirs::download_dir 在沙箱无意义）；inbox_list/inbox_delete 扫 app_data/Tailsend + app_data/inbox（node 收件箱）双根。
+  - **UI**：内置节点卡片（3s 轮询 node_status；off→启动 / starting / needs_login→打开浏览器登录 / running→IP+tailnet+接收开关（token/confirm 复用现有设置）/ error→重试）；桌面 node_status 报错 → 卡片隐藏。
+  - **AAR 不入库**：`apply-node.sh`（gomobile bind → plugins/tsnet/android/libs/，断言 libgojni.so）；release.yml android job 加 setup-go + apply-node 步骤。
 - **AAR 产出（已验证，2026-10-31）**：`PATH=$HOME/go/bin:$PATH gomobile bind -target=android -androidapi 24 -o tailsend.aar ./mobile`（go.mod 有 tool gobind；首次全量编译约 4-5 分钟）。产物 ~63MB（4 ABI 各 ~40MB libgojni.so——tsnet 本体大）；接 Kotlin 时 APK 分 ABI 已有，实际进包 arm64+armv7 各 ~40MB，可接受但需在发版说明里注明。生成的 Kotlin 面：`Mobile.newNode(h,d,v)` / `node.status()/loginURL()/ip()/setPrompt(Prompt)/startReceiver(token,confirm)/stopReceiver()/pingTarget()/shutdown()` / `Prompt.ask(sender,count:Long,total:Long,namesJSON)`。
 
 ## 4. 路线
@@ -79,5 +85,5 @@ Tailsend 只做两件事：**发送**和**接收**。所有设计围绕这两件
 |---|---|---|
 | P1 | 协议 v3 双端（Go + Rust）+ 测试 | ✅ Go 3c6cd56 / Rust 5fb4020，互操作矩阵 6 场景全过 |
 | P2 | GUI：确认弹窗、等待确认态、确认开关（发送/接收两区待后续迭代） | ✅ 弹窗/开关/等待态已落地 |
-| P3 | tsnet all-in-one（mobile 包 → AAR → Kotlin → 桥 → UI） | ⏳ P0 尖刺 ✅ + core/ 协议引擎 + mobile/ 节点包 ✅（2026-10-31）；下一步 Kotlin 服务 + Tauri 桥 |
+| P3 | tsnet all-in-one（mobile 包 → AAR → Kotlin → 桥 → UI） | ⏳ P0 尖刺 + core/ + mobile/ + P2 Kotlin/桥/UI ✅（2026-10-31，commit 后补）；剩真机验证 |
 | P4 | v0.2.0 发布（版本号 6 处 + release notes） | ⏳ |

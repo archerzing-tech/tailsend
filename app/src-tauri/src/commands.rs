@@ -138,6 +138,7 @@ pub async fn set_confirm(
 // An unknown id (already answered, or the request timed out) is an error.
 #[tauri::command]
 pub async fn request_respond(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     id: String,
     accept: bool,
@@ -145,7 +146,15 @@ pub async fn request_respond(
     let tx = state.pending.lock().unwrap().remove(&id);
     match tx {
         Some(tx) => tx.send(accept).map_err(|_| "该请求已结束".to_string()),
-        None => Err("该请求已超时或不存在".to_string()),
+        // Not one of the Rust receiver's asks — embedded-node asks use "n…"
+        // ids and are answered through the Kotlin bridge instead.
+        None => {
+            let node = app.state::<tauri_plugin_tsnet::TsnetNode<tauri::Wry>>();
+            node.call("respond", json!({ "id": id, "accept": accept }))
+                .await
+                .map(|_| ())
+                .or(Err("该请求已超时或不存在".to_string()))
+        }
     }
 }
 
@@ -193,7 +202,10 @@ pub async fn pick_files(window: tauri::WebviewWindow) -> Result<Vec<String>, Str
 #[tauri::command]
 pub async fn pick_folders(window: tauri::WebviewWindow) -> Result<Vec<String>, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    return Err("移动端不支持文件夹选择".to_string());
+    {
+        let _ = window;
+        return Err("移动端不支持文件夹选择".to_string());
+    }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         Ok(tauri::async_runtime::spawn_blocking(move || {
@@ -327,6 +339,21 @@ pub async fn send_data_begin(
             netcore::human(DATA_CAP as i64)
         ));
     }
+    // Embedded-node route: no OS VPN, so the Rust sender can't reach the
+    // tailnet — stage the bytes to a temp file and let Go do consent +
+    // upload through tsnet (send_data_end triggers it).
+    {
+        let node = app.state::<NodeState>();
+        if let Some(path) = node_stage_begin(&app, &state, &node, &name).await? {
+            let id = state.next_data_id();
+            state
+                .slots
+                .lock()
+                .unwrap()
+                .insert(id, Slot::NodeTemp { file: path.0, path: path.1, target });
+            return Ok(id);
+        }
+    }
     let (ip, port) = discovery::find_target(&target, netcore::DEFAULT_PORT).await?;
     let addr = format!("{ip}:{port}");
     let token = state.recv.lock().unwrap().token.clone();
@@ -362,7 +389,7 @@ pub async fn send_data_begin(
         .slots
         .lock()
         .unwrap()
-        .insert(id, Slot { tx, done: done_rx });
+        .insert(id, Slot::Stream { tx, done: done_rx });
     Ok(id)
 }
 
@@ -372,31 +399,98 @@ pub async fn send_data_chunk(
     id: u64,
     b64: String,
 ) -> Result<(), String> {
-    let tx = {
-        let slots = state.slots.lock().unwrap();
-        match slots.get(&id) {
-            Some(s) => s.tx.clone(),
-            None => return Err(format!("传输 #{id} 不存在或已结束")),
-        }
-    };
     let data = base64::engine::general_purpose::STANDARD
         .decode(&b64)
         .map_err(|e| format!("数据解码失败：{e}"))?;
+    let tx = {
+        let mut slots = state.slots.lock().unwrap();
+        match slots.get_mut(&id) {
+            Some(Slot::NodeTemp { file, .. }) => {
+                use std::io::Write;
+                file.write_all(&data)
+                    .map_err(|e| format!("暂存写入失败：{e}"))?;
+                return Ok(());
+            }
+            Some(Slot::Stream { tx, .. }) => tx.clone(),
+            None => return Err(format!("传输 #{id} 不存在或已结束")),
+        }
+    };
     tx.send(bytes::Bytes::from(data))
         .await
         .map_err(|_| format!("传输 #{id} 已中断"))
 }
 
 #[tauri::command]
-pub async fn send_data_end(state: tauri::State<'_, AppState>, id: u64) -> Result<(), String> {
+pub async fn send_data_end(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    id: u64,
+) -> Result<(), String> {
     let slot = state.slots.lock().unwrap().remove(&id);
     match slot {
         None => Err(format!("传输 #{id} 不存在或已结束")),
-        Some(slot) => {
-            drop(slot.tx); // EOF for the stream
-            slot.done.await.map_err(|_| format!("传输 #{id} 已中断"))?
+        Some(Slot::Stream { tx, done }) => {
+            drop(tx); // EOF for the stream
+            done.await.map_err(|_| format!("传输 #{id} 已中断"))?
+        }
+        Some(Slot::NodeTemp { file, path, target }) => {
+            drop(file);
+            let token = app.state::<AppState>().recv.lock().unwrap().token.clone();
+            let node = app.state::<NodeState>();
+            let r = node
+                .call(
+                    "send_files",
+                    json!({ "target": target, "paths": [path.to_string_lossy()], "token": token }),
+                )
+                .await?;
+            let _ = std::fs::remove_file(&path);
+            if let Some(e) = r.get("error").and_then(|v| v.as_str()) {
+                return Err(e.to_string());
+            }
+            if r.get("failed").and_then(|v| v.as_u64()).unwrap_or(0) > 0 {
+                let msg = r
+                    .get("results")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| {
+                        a.iter().find_map(|f| {
+                            f.get("error").and_then(|e| e.as_str()).map(String::from)
+                        })
+                    })
+                    .unwrap_or_else(|| "发送失败".into());
+                return Err(msg);
+            }
+            Ok(())
         }
     }
+}
+
+// When the embedded node owns the route, stage a data-mode upload to a temp
+// file; None keeps the normal Rust-sender path. The Go side asks for consent
+// and uploads through tsnet once send_data_end fires.
+async fn node_stage_begin(
+    app: &tauri::AppHandle,
+    state: &tauri::State<'_, AppState>,
+    node: &NodeState,
+    name: &str,
+) -> Result<Option<(std::fs::File, std::path::PathBuf)>, String> {
+    use tauri::Manager;
+    let st = node.call("status", json!({})).await.unwrap_or(json!({}));
+    if st.get("state").and_then(|s| s.as_str()) != Some("running") {
+        return Ok(None);
+    }
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("send-tmp");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("临时目录创建失败：{e}"))?;
+    let base = name.rsplit('/').next().unwrap_or("file");
+    let base = base.rsplit('\\').next().unwrap_or(base);
+    let safe: String = base.trim().trim_matches('.').replace(['/', '\\', ':', '\u{0}'], "_");
+    let safe = if safe.is_empty() { "file".to_string() } else { safe };
+    let path = dir.join(format!("stage-{}-{safe}", state.next_data_id()));
+    let file = std::fs::File::create(&path).map_err(|e| format!("临时文件创建失败：{e}"))?;
+    Ok(Some((file, path)))
 }
 
 #[derive(Serialize)]
@@ -438,63 +532,23 @@ fn strip_temp_suffix(rel: &str) -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn inbox_list(state: tauri::State<'_, AppState>) -> Result<serde_json::Value, String> {
+pub async fn inbox_list(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
     let dir = state.recv.lock().unwrap().save_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let mut out: Vec<InboxEntry> = vec![];
-        let mut total = 0usize;
         // (rel path, size, mtime, incoming) — in-flight temps collapse onto the
         // final name so a receiving file shows up once, growing live.
         let mut incoming: std::collections::HashMap<String, InboxEntry> =
             std::collections::HashMap::new();
-        for e in walkdir::WalkDir::new(&dir).into_iter().filter_map(|r| r.ok()) {
-            if !e.file_type().is_file() {
-                continue;
-            }
-            let fname = e.file_name().to_string_lossy();
-            let is_incoming = fname.ends_with(".part") || netcore::is_temp_name(&fname);
-            let rel = e.path().strip_prefix(&dir).unwrap_or(e.path());
-            let rel = rel
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy().to_string())
-                .collect::<Vec<_>>()
-                .join("/");
-            let (size, mtime) = match e.metadata() {
-                Ok(m) => (
-                    m.len(),
-                    m.modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_millis() as u64)
-                        .unwrap_or(0),
-                ),
-                Err(_) => (0, 0),
-            };
-            if is_incoming {
-                let shown = match strip_temp_suffix(&rel) {
-                    Some(s) => s,
-                    None => rel.clone(),
-                };
-                let slot = incoming.entry(shown).or_insert(InboxEntry {
-                    path: rel.clone(),
-                    size: 0,
-                    mtime: 0,
-                    incoming: true,
-                });
-                slot.size += size; // parallel chunks land in separate temps
-                slot.mtime = slot.mtime.max(mtime);
-                continue;
-            }
-            total += 1;
-            out.push(InboxEntry {
-                path: rel,
-                size,
-                mtime,
-                incoming: false,
-            });
+        let mut seen = std::collections::HashSet::new();
+        for dir in inbox_roots(&app, &dir) {
+            scan_inbox_dir(&dir, &mut out, &mut incoming, &mut seen);
         }
+        let total = seen.len();
         let mut inc: Vec<InboxEntry> = incoming.into_values().collect();
-        total += inc.len();
         inc.sort_by(|a, b| b.mtime.cmp(&a.mtime));
         out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
         let mut files = inc;
@@ -506,7 +560,11 @@ pub async fn inbox_list(state: tauri::State<'_, AppState>) -> Result<serde_json:
 }
 
 #[tauri::command]
-pub async fn inbox_delete(state: tauri::State<'_, AppState>, path: String) -> Result<(), String> {
+pub async fn inbox_delete(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
     let dir = state.recv.lock().unwrap().save_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let base = std::path::Path::new(&path)
@@ -518,7 +576,18 @@ pub async fn inbox_delete(state: tauri::State<'_, AppState>, path: String) -> Re
         if netcore::is_temp_name(&base) || path.ends_with(".part") {
             return Err("文件还在接收中，暂时不能删除".into());
         }
-        let full = netcore::safe_join(&dir, &path)?;
+        let mut hit: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
+        for root in inbox_roots(&app, &dir) {
+            if let Ok(full) = netcore::safe_join(&root, &path) {
+                if full.symlink_metadata().is_ok() {
+                    hit = Some((full, root));
+                    break;
+                }
+            }
+        }
+        let Some((full, dir)) = hit else {
+            return Err(format!("{path}: 文件不存在"));
+        };
         let meta = std::fs::symlink_metadata(&full).map_err(|e| format!("{path}: {e}"))?;
         if meta.is_dir() {
             std::fs::remove_dir_all(&full).map_err(|e| e.to_string())?;
@@ -539,6 +608,79 @@ pub async fn inbox_delete(state: tauri::State<'_, AppState>, path: String) -> Re
     .map_err(|e| e.to_string())?
 }
 
+// Every directory the inbox reads: the Rust receiver's save dir plus, on
+// Android, the embedded node's inbox (filesDir/inbox inside app data).
+fn inbox_roots(app: &tauri::AppHandle, save_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    #[allow(unused_mut)] // the push is cfg'd to android
+    let mut roots = vec![save_dir.to_path_buf()];
+    #[cfg(target_os = "android")]
+    {
+        use tauri::Manager;
+        if let Ok(d) = app.path().app_data_dir() {
+            roots.push(d.join("inbox"));
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = app;
+    roots
+}
+
+fn scan_inbox_dir(
+    dir: &std::path::Path,
+    out: &mut Vec<InboxEntry>,
+    incoming: &mut std::collections::HashMap<String, InboxEntry>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    for e in walkdir::WalkDir::new(dir).into_iter().filter_map(|r| r.ok()) {
+        if !e.file_type().is_file() {
+            continue;
+        }
+        let fname = e.file_name().to_string_lossy();
+        let is_incoming = fname.ends_with(".part") || netcore::is_temp_name(&fname);
+        let rel = e.path().strip_prefix(dir).unwrap_or(e.path());
+        let rel = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("/");
+        if !seen.insert(rel.clone()) {
+            continue; // same rel name in both roots — first root wins
+        }
+        let (size, mtime) = match e.metadata() {
+            Ok(m) => (
+                m.len(),
+                m.modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0),
+            ),
+            Err(_) => (0, 0),
+        };
+        if is_incoming {
+            let shown = match strip_temp_suffix(&rel) {
+                Some(s) => s,
+                None => rel.clone(),
+            };
+            let slot = incoming.entry(shown).or_insert(InboxEntry {
+                path: rel.clone(),
+                size: 0,
+                mtime: 0,
+                incoming: true,
+            });
+            slot.size += size; // parallel chunks land in separate temps
+            slot.mtime = slot.mtime.max(mtime);
+            continue;
+        }
+        out.push(InboxEntry {
+            path: rel,
+            size,
+            mtime,
+            incoming: false,
+        });
+    }
+}
+
 #[tauri::command]
 pub async fn open_inbox(state: tauri::State<'_, AppState>) -> Result<(), String> {
     let dir = state.recv.lock().unwrap().save_dir.clone();
@@ -555,4 +697,97 @@ pub async fn open_inbox(state: tauri::State<'_, AppState>) -> Result<(), String>
         "移动端不支持",
     ));
     r.map(|_| ()).map_err(|e| e.to_string())
+}
+
+// ---- Embedded tsnet node (Android) ----
+// Thin wrappers over the plugin's managed bridge; payloads and replies are
+// plain JSON matching the Kotlin TsnetNodePlugin command surface. The node
+// serves its own receiver on the tailnet, so while it is running the GUI
+// routes receiving, pinging and sending through these instead of netcore.
+
+type NodeState = tauri_plugin_tsnet::TsnetNode<tauri::Wry>;
+
+use tauri::Manager;
+
+#[tauri::command]
+pub async fn node_status(state: tauri::State<'_, NodeState>) -> Result<serde_json::Value, String> {
+    state.call("status", json!({})).await
+}
+
+#[tauri::command]
+pub async fn node_ensure(state: tauri::State<'_, NodeState>) -> Result<serde_json::Value, String> {
+    state.call("ensure", json!({})).await
+}
+
+#[tauri::command]
+pub async fn node_start_receiver(
+    state: tauri::State<'_, NodeState>,
+    token: Option<String>,
+    confirm: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    state
+        .call(
+            "start_receiver",
+            json!({ "token": token.unwrap_or_default(), "confirm": confirm.unwrap_or(true) }),
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn node_stop_receiver(
+    state: tauri::State<'_, NodeState>,
+) -> Result<serde_json::Value, String> {
+    state.call("stop_receiver", json!({})).await
+}
+
+#[tauri::command]
+pub async fn node_pending(state: tauri::State<'_, NodeState>) -> Result<serde_json::Value, String> {
+    state.call("pending", json!({})).await
+}
+
+#[tauri::command]
+pub async fn node_respond(
+    state: tauri::State<'_, NodeState>,
+    id: String,
+    accept: bool,
+) -> Result<serde_json::Value, String> {
+    state.call("respond", json!({ "id": id, "accept": accept })).await
+}
+
+#[tauri::command]
+pub async fn node_ping_target(
+    state: tauri::State<'_, NodeState>,
+    app: tauri::AppHandle,
+    target: String,
+) -> Result<serde_json::Value, String> {
+    let token = app.state::<AppState>().recv.lock().unwrap().token.clone();
+    state
+        .call("ping_target", json!({ "target": target, "token": token }))
+        .await
+}
+
+#[tauri::command]
+pub async fn node_send_files(
+    state: tauri::State<'_, NodeState>,
+    app: tauri::AppHandle,
+    target: String,
+    paths: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    if paths.is_empty() {
+        return Err("没有可发送的文件".into());
+    }
+    let app_state = app.state::<AppState>();
+    let token = app_state.recv.lock().unwrap().token.clone();
+    drop(app_state);
+    state
+        .call(
+            "send_files",
+            json!({ "target": target, "paths": paths, "token": token }),
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn node_open_login(state: tauri::State<'_, NodeState>) -> Result<serde_json::Value, String> {
+    state.call("open_login", json!({})).await
 }

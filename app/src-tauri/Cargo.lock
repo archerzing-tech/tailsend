@@ -3682,6 +3682,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tauri-plugin-tsnet",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -3858,6 +3859,32 @@ dependencies = [
  "syn 2.0.119",
  "tauri-codegen",
  "tauri-utils",
+]
+
+[[package]]
+name = "tauri-plugin"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "67fb21a77e8f94e8beb3325e583102488659365af0a3948b7ea244c5b779c291"
+dependencies = [
+ "anyhow",
+ "glob",
+ "plist",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tauri-utils",
+ "walkdir",
+]
+
+[[package]]
+name = "tauri-plugin-tsnet"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "tokio",
 ]
 
 [[package]]

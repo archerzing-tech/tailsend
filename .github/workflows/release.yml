@@ -79,9 +79,14 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: Install Tauri CLI
         working-directory: app
         run: npm ci
+      - name: Build embedded-node AAR (gomobile; ~63MB, never committed)
+        run: ./app/src-tauri/android/apply-node.sh
       - name: Generate Android project
         working-directory: app
         run: npx tauri android init

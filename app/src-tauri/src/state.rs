@@ -34,10 +34,19 @@ pub struct RecvState {
     shutdown: Option<watch::Sender<()>>,
 }
 
-// One in-flight webview-provided (JS) file upload.
-pub struct Slot {
-    pub tx: mpsc::Sender<bytes::Bytes>,
-    pub done: oneshot::Receiver<Result<(), String>>,
+// One in-flight webview-provided (JS) file upload: streamed straight to the
+// receiver, or staged to a temp file when the embedded node owns the route
+// (Go asks for consent and uploads from disk once the whole file is here).
+pub enum Slot {
+    Stream {
+        tx: mpsc::Sender<bytes::Bytes>,
+        done: oneshot::Receiver<Result<(), String>>,
+    },
+    NodeTemp {
+        file: std::fs::File,
+        path: PathBuf,
+        target: String,
+    },
 }
 
 #[derive(Serialize)]

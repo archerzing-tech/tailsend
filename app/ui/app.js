@@ -101,6 +101,89 @@ function bannerHide() {
   $("banner").hidden = true;
 }
 
+/* ---------------------------------------------------------- embedded node */
+// The Android build can run its own tailnet node (no official Tailscale app
+// needed). Desktop has no node: node_status errors there and the card hides.
+
+let nodeStatus = null;
+let nodeRunning = false; // running → sends and peer probes route through Go
+
+const nodeVerbs = {
+  off: "未启用",
+  starting: "启动中",
+  needs_login: "等待登录",
+  running: "已连接",
+  error: "出错",
+};
+
+async function pollNode() {
+  let st = null;
+  try { st = await invoke("node_status"); } catch { /* desktop: no node */ }
+  nodeStatus = st || null;
+  nodeRunning = !!st && st.state === "running";
+  renderNode();
+}
+
+function nodeBind(id, fn) {
+  const el = $(id);
+  if (el) el.onclick = fn;
+}
+
+function renderNode() {
+  const card = $("node-card");
+  if (!nodeStatus) { card.hidden = true; return; }
+  card.hidden = false;
+  const st = nodeStatus;
+  const state = st.state || "off";
+  $("node-state").textContent = nodeVerbs[state] || state;
+  const body = $("node-body");
+  if (state === "off") {
+    body.innerHTML = `
+      <p class="node-hint">登录后这台手机本身就是 tailnet 节点，不装官方 Tailscale 也能收发。协议与桌面端完全一致。</p>
+      <div class="node-actions"><button class="primary" id="node-start">启动内置节点</button></div>`;
+    nodeBind("node-start", () => invoke("node_ensure").then(pollNode).catch((e) => toast(String((e && e.message) || e), "err")));
+  } else if (state === "starting") {
+    body.innerHTML = `<p class="node-hint">正在启动，一般几秒内完成…</p>`;
+  } else if (state === "needs_login") {
+    body.innerHTML = `
+      <p class="node-hint">在浏览器里完成 Tailscale 授权后，这里会自动变成「已连接」。</p>
+      <div class="node-actions"><button class="primary" id="node-login">打开浏览器登录</button></div>`;
+    nodeBind("node-login", () => invoke("node_open_login").catch((e) => toast(String((e && e.message) || e), "err")));
+  } else if (state === "running") {
+    const recvOn = st.receiver === "on";
+    body.innerHTML = `
+      <p class="node-meta">本机节点 <b class="mono">${esc(st.ip || "")}</b>${st.tailnet ? " · " + esc(st.tailnet) : ""}</p>
+      <div class="node-actions">
+        <button class="${recvOn ? "ghost" : "primary"}" id="node-recv">${recvOn ? "关闭接收" : "开启接收"}</button>
+      </div>
+      <p class="node-hint">接收的文件保存在应用目录的 inbox 里，收件箱列表会自动合并显示。</p>`;
+    nodeBind("node-recv", async () => {
+      const t = localStorage.getItem("ts.token.v1") || "";
+      const confirm = localStorage.getItem("ts.confirm.v1") !== "0";
+      try {
+        if (recvOn) await invoke("node_stop_receiver");
+        else await invoke("node_start_receiver", { token: t, confirm });
+        toast(recvOn ? "内置节点接收已关闭" : "内置节点接收已开启，收件地址 " + (st.ip || "") + ":4782", "ok");
+      } catch (e) { toast(String((e && e.message) || e), "err"); }
+      pollNode();
+    });
+  } else if (state === "error") {
+    body.innerHTML = `
+      <p class="node-hint err">${esc(st.error || "节点出错")}</p>
+      <div class="node-actions"><button class="ghost" id="node-again">重试</button></div>`;
+    nodeBind("node-again", () => invoke("node_ensure").then(pollNode).catch(() => {}));
+  }
+}
+
+// Peer probe: through the embedded node when it is up, otherwise the system
+// route. Both answer { name, version } about the receiver at addr.
+async function pingTarget(addr) {
+  if (!nodeRunning) return invoke("ping_peer", { target: addr });
+  const r = await invoke("node_ping_target", { target: addr });
+  if (r && r.ok) return { online: true, name: r.name, version: r.version, your_ip: r.your_ip || "" };
+  throw new Error((r && r.error) || "unreachable");
+}
+
 /* ---------------------------------------------------------------- peers */
 
 // Track online transitions so a node that just came online can flash its row.
@@ -141,7 +224,7 @@ const peerKey = (p) => p.ip + "|" + p.name; // names alone can collide
 // True when a Tailsend receiver answers at addr (short, token-authed ping).
 async function probeAddr(addr) {
   try {
-    const r = await invoke("ping_peer", { target: addr });
+    const r = await pingTarget(addr);
     if (r.your_ip) rememberSelfIp(r.your_ip);
     return true;
   } catch {
@@ -155,7 +238,7 @@ const rank = (p) => (p.recv === true ? 0 : p.online ? 1 : 2);
 async function probeSaved() {
   await Promise.all(loadSaved().map(async (t) => {
     try {
-      const r = await invoke("ping_peer", { target: t.addr });
+      const r = await pingTarget(t.addr);
       savedOnline.set(t.addr, { online: true, name: r.name, version: r.version, your_ip: r.your_ip });
       if (r.your_ip) rememberSelfIp(r.your_ip);
       // Adopt the peer's real hostname once we learn it.
@@ -689,7 +772,7 @@ async function send() {
     const entries = ready.map((i) => ({ path: i.path, rel: i.rel, size: i.size }));
     let reqId = "";
     try {
-      reqId = (await invoke("request_send", { target: pt.t.addr, entries })) || "";
+      reqId = nodeRunning ? "" : (await invoke("request_send", { target: pt.t.addr, entries })) || "";
     } catch (err) {
       // Refused / nobody there / timeout: the whole batch fails for this
       // target — say so once, keep the other targets going.
@@ -963,6 +1046,8 @@ function wire() {
   loadStatus();
   loadPeers();
   loadInbox();
+  pollNode();
+  setInterval(pollNode, 3000);
   setInterval(loadStatus, 10000);
   setInterval(loadPeers, 15000);
   setInterval(loadInbox, 3000);

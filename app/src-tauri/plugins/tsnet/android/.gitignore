@@ -1,0 +1,4 @@
+# Generated at build time: gomobile AAR + the tauri-api kotlin library copy
+libs/
+.tauri/
+build/

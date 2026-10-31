@@ -993,3 +993,11 @@ button.ghost.on {
 @media (prefers-reduced-motion: reduce) {
   .req-card { animation: none; }
 }
+
+/* embedded node card (mobile) */
+.node-card[hidden] { display: none; }
+.node-body { padding: 0 16px 14px; }
+.node-hint { margin: 6px 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.node-hint.err { color: var(--err); }
+.node-meta { margin: 6px 0 10px; font-size: 13px; color: var(--text); }
+.node-actions { display: flex; gap: 8px; flex-wrap: wrap; }

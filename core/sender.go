@@ -80,10 +80,36 @@ var errOldReceiver = errors.New("receiver does not support chunked upload")
 // response-header deadlines apply to every request, and chunk uploads add a
 // per-attempt context timeout (4 MiB in 2 min ≈ a 35 KB/s floor). The bare
 // http.DefaultClient would hang forever on a receiver that stalls mid-send.
+// dialHook routes sender traffic through an embedded node's userspace
+// WireGuard when set (mobile/tsnet); nil means the OS network stack. The
+// receiver never needs it — its listener is injected directly.
+var (
+	dialMu sync.RWMutex
+	dialFn func(ctx context.Context, network, addr string) (net.Conn, error)
+)
+
+// SetDialContext points every sender HTTP client at fn. Call once at node
+// startup, before the first send; pass nil to restore the OS stack.
+func SetDialContext(fn func(ctx context.Context, network, addr string) (net.Conn, error)) {
+	dialMu.Lock()
+	dialFn = fn
+	dialMu.Unlock()
+}
+
+func dialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	dialMu.RLock()
+	fn := dialFn
+	dialMu.RUnlock()
+	if fn != nil {
+		return fn(ctx, network, addr)
+	}
+	return (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, network, addr)
+}
+
 var httpClient = &http.Client{
 	Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:           dialContext,
 		ResponseHeaderTimeout: 30 * time.Second,
 		IdleConnTimeout:       90 * time.Second,
 		MaxIdleConnsPerHost:   chunkConcurrent,
@@ -144,7 +170,7 @@ func CollectFiles(paths []string) ([]File, error) {
 }
 
 func PingReceiver(addr, token string) (*PingResult, error) {
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DialContext: dialContext}}
 	req, err := http.NewRequest("GET", "http://"+addr+"/api/ping", nil)
 	if err != nil {
 		return nil, err
@@ -182,7 +208,7 @@ func RequestTransfer(addr, token, sender string, files []File) (string, error) {
 
 	// The receiver may hold the request open up to ConfirmWait while a human
 	// decides; give the round trip a little headroom.
-	client := &http.Client{Timeout: ConfirmWait + 10*time.Second}
+	client := &http.Client{Timeout: ConfirmWait + 10*time.Second, Transport: &http.Transport{DialContext: dialContext}}
 	resp, err := postJSONClient("http://"+addr+"/api/request", token, payload, client)
 	if err != nil {
 		return "", fmt.Errorf("could not ask the receiver for permission: %v", err)

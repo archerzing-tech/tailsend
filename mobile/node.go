@@ -87,6 +87,9 @@ func (n *Node) startAsync() error {
 			return
 		}
 		ip4, _ := s.TailscaleIPs()
+		// Route the sender engine through the node's userspace WireGuard:
+		// a plain net dialer can't reach 100.x addresses without the OS VPN.
+		core.SetDialContext(s.Dial)
 		n.mu.Lock()
 		n.state = "running"
 		n.ip = ip4.String()
@@ -237,6 +240,7 @@ func (n *Node) Shutdown() {
 	s := n.srv
 	n.mu.Unlock()
 	if s != nil {
+		core.SetDialContext(nil)
 		s.Close()
 	}
 }
@@ -290,9 +294,16 @@ func (n *Node) PingTarget(addr, token string) string {
 
 // SendFiles asks addr for consent (protocol v3) then uploads every path,
 // returning JSON {sent, failed, results:[{name, ok, error}]}.
-// files may name files or directories (directories are sent recursively).
+// filesJSON is a JSON array of paths; entries may name files or
+// directories (directories are sent recursively). gobind only binds
+// byte slices, so the list travels as JSON rather than []string.
 // It blocks until the batch finishes — call from a background thread.
-func (n *Node) SendFiles(addr, token, sender string, files []string) string {
+func (n *Node) SendFiles(addr, token, sender, filesJSON string) string {
+	var files []string
+	if err := json.Unmarshal([]byte(filesJSON), &files); err != nil {
+		b, _ := json.Marshal(map[string]any{"error": "bad files json: " + err.Error()})
+		return string(b)
+	}
 	res := struct {
 		Sent    int `json:"sent"`
 		Failed  int `json:"failed"`

@@ -1,0 +1,14 @@
+[package]
+name = "tauri-plugin-tsnet"
+description = "Embedded tsnet node bridge for the tailsend mobile app"
+version = "0.1.0"
+edition = "2021"
+links = "tauri-plugin-tsnet"
+
+[build-dependencies]
+tauri-plugin = { version = "2", features = ["build"] }
+
+[dependencies]
+tauri = { version = "2" }
+serde_json = "1"
+tokio = { version = "1", features = ["time"] }
