@@ -1,11 +1,10 @@
 // Tailsend UI — talks to the Rust core through Tauri commands and events.
-// One DOM serves both platforms: desktop (rail + deck) and mobile (three
-// tabs). Shared blocks render into every [data-mount] instance; controls
-// carry data-action so one handler drives both skins.
+// One DOM serves both platforms: desktop (sidebar) and mobile (bottom tabs);
+// body[data-platform] switches the skeleton. Controls carry data-action so
+// one handler drives every instance.
 const T = window.__TAURI__;
 const invoke = T.core.invoke;
 const listen = T.event.listen;
-const { open } = T.dialog || {};
 
 const DATA_CAP = 1024 * 1024 * 1024;
 const CHUNK = 1024 * 1024;
@@ -42,10 +41,16 @@ function toast(msg, type = "info") {
   setTimeout(() => t.remove(), 4500);
 }
 
-const OS_ICON = {
-  macOS: "", linux: "🐧", windows: "🪟", android: "🤖", iOS: "",
+// 设备头像：按 OS 出线稿图标（桌面/手机/服务器），与文件瓦片同一笔画家族
+const OS_AVATAR = {
+  macOS: '<svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="10.5" rx="1.8"/><path d="M2.5 18.5h19"/></svg>',
+  windows: '<svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="10.5" rx="1.8"/><path d="M2.5 18.5h19"/></svg>',
+  linux: '<svg viewBox="0 0 24 24"><rect x="4.5" y="4.5" width="15" height="6.5" rx="1.5"/><rect x="4.5" y="13" width="15" height="6.5" rx="1.5"/><path d="M7.5 7.75h.01M7.5 16.25h.01"/></svg>',
+  iOS: '<svg viewBox="0 0 24 24"><rect x="7.5" y="3.5" width="9" height="17" rx="2"/><path d="M11 17.8h2"/></svg>',
+  android: '<svg viewBox="0 0 24 24"><rect x="7.5" y="3.5" width="9" height="17" rx="2"/><path d="M11 17.8h2"/></svg>',
 };
-const osIcon = (os) => OS_ICON[os] || "🖥";
+const osAvatar = (os) => OS_AVATAR[os] ||
+  '<svg viewBox="0 0 24 24"><rect x="4.5" y="5" width="15" height="10.5" rx="2"/><path d="M2.5 18.5h19"/></svg>';
 
 /* ------------------------------------------------------------- platform */
 
@@ -62,16 +67,22 @@ async function detectPlatform() {
     }
   } catch { platform = "desktop"; }
   document.body.dataset.platform = platform;
+  // 移动端没有拖放，选择区文案按平台换说法（DOM 共享，只差这句 copy）
+  const mobile = platform === "mobile";
+  $$(".drop-title").forEach((el) => { el.textContent = mobile ? "添加要发送的文件" : "拖入文件或文件夹"; });
+  $$(".drop-hint").forEach((el) => { el.textContent = mobile ? "支持一次多选；超过 1GB 请用「选择文件」" : "超过 1GB 的文件请用「选择文件」走原生通道"; });
 }
 
 /* ---------------------------------------------------------------- status */
 
 let recvSaveDir = "";
+let desktopListening = null; // desktop receiver state, from get_status
 
 async function loadStatus() {
   try {
     const s = await invoke("get_status");
     $("ver").textContent = "v" + s.version;
+    setMount("self-ver", (el) => { el.textContent = "Tailsend v" + s.version; });
     const r = s.receiver;
     const chip = $("chip-recv");
     if (r.listening) {
@@ -91,12 +102,12 @@ async function loadStatus() {
       el.hidden = !recvSaveDir;
       el.textContent = "文件保存在 " + recvSaveDir;
     });
-    if (platform === "desktop") {
-      const dir = $("chip-dir");
-      dir.hidden = false;
-      dir.title = r.save_dir;
-      dir.textContent = "保存到 " + r.save_dir;
-    }
+    const dir = $("chip-dir");
+    dir.hidden = false;
+    dir.title = r.save_dir;
+    dir.textContent = "保存到 " + r.save_dir;
+    desktopListening = !!r.listening;
+    syncHero();
     bannerHide();
   } catch (e) {
     toast("状态获取失败：" + e, "err");
@@ -174,7 +185,33 @@ async function nodeToggleRecv() {
   pollNode();
 }
 
-// One sync paints every node-aware surface: node tab card, tab badge, the
+// 接收页 hero 的三态：on=雷达呼吸（真的能收），warn=琥珀（要人管），off=静默
+function syncHero() {
+  const hero = document.querySelector(".hero");
+  if (!hero) return;
+  let mode = "warn";
+  let text = "";
+  if (platform === "mobile") {
+    const st = nodeStatus;
+    const state = st ? st.state || "off" : "off";
+    if (state === "running") {
+      if (st.receiver === "on") { mode = "on"; text = "接收中 · " + (st.ip || "") + ":4782"; }
+      else { mode = "warn"; text = "接收已关闭 · 打开开关开始接收"; }
+    } else if (state === "starting") { mode = "warn"; text = "节点启动中…"; }
+    else if (state === "needs_login") { mode = "warn"; text = "需要先登录 · 在「本机」页登录"; }
+    else if (state === "error") { mode = "warn"; text = "节点出错 · 在「本机」页重试"; }
+    else { mode = "warn"; text = "内置节点未启用 · 在「本机」页启动"; }
+  } else {
+    if (desktopListening === null) { mode = "warn"; text = "检测中…"; }
+    else if (desktopListening) { mode = "on"; text = "接收中 · 等待对方发送"; }
+    else { mode = "warn"; text = "接收端未运行"; }
+  }
+  hero.classList.toggle("on", mode === "on");
+  hero.classList.toggle("warn", mode === "warn");
+  setMount("recv-meta", (el) => { el.textContent = text; });
+}
+
+// One sync paints every node-aware surface: node card, tab badge, the
 // send page guard, and the receive master switch.
 function syncNodeUI() {
   const st = nodeStatus;
@@ -219,16 +256,6 @@ function syncNodeUI() {
     });
   });
 
-  // Receive master switch + meta line.
-  setMount("recv-meta", (el) => {
-    el.classList.toggle("on", !!st && state === "running" && st.receiver === "on");
-    if (!isMobile || !st) { el.textContent = "内置节点未运行 · 在「节点」页启用"; return; }
-    if (state === "off") el.textContent = "内置节点未启用 · 在「节点」页启动";
-    else if (state === "starting") el.textContent = "节点启动中…";
-    else if (state === "needs_login") el.textContent = "需要先登录 · 在「节点」页登录";
-    else if (state === "error") el.textContent = "节点出错 · 在「节点」页重试";
-    else el.textContent = "接收中 · " + (st.ip || "") + ":4782";
-  });
   bindAll("recv-master", (el) => {
     const on = !!st && state === "running" && st.receiver === "on";
     el.setAttribute("aria-pressed", String(on));
@@ -237,7 +264,7 @@ function syncNodeUI() {
 
   setMount("node-state", (el) => { el.textContent = st ? (nodeVerbs[state] || state) : ""; });
 
-  // Node card body (mobile node tab).
+  // Node card body (本机 tab, mobile only).
   mount("node-body").forEach((body) => {
     if (!isMobile || !st) { body.innerHTML = ""; return; }
     if (state === "off") {
@@ -268,6 +295,8 @@ function syncNodeUI() {
       b.onclick = a === "ensure" ? nodeEnsure : a === "login" ? nodeLogin : nodeToggleRecv;
     });
   });
+
+  syncHero();
 }
 
 // Peer probe: through the embedded node when it is up, otherwise the system
@@ -281,14 +310,14 @@ async function pingTarget(addr) {
 
 /* ---------------------------------------------------------------- peers */
 
-// Track online transitions so a node that just came online can flash its row.
+// Track online transitions so a node that just came online can flash its card.
 const prevOnline = new Map(); // "ip|name" -> bool
 let peersLoading = false;
 let peerFilter = "";
 
 // Saved targets: mobile has no tailscale CLI, so there this list *is* the
 // peer list; on desktop it pins frequently-used nodes so they survive
-// discovery hiccups. Each entry is probed live for its online dot.
+// discovery hiccups. Each entry is probed live for its status dot.
 const SAVED_KEY = "ts.saved.v1";
 const savedOnline = new Map(); // addr -> { online, name?, version?, your_ip? }
 
@@ -348,14 +377,19 @@ async function probeSaved() {
 }
 
 let selfIp = "";
+let selfName = "";
 function rememberSelfIp(ip) {
   if (!ip) return;
   try { localStorage.setItem("ts.myip", ip); } catch { /* ignore */ }
   if (selfIp === ip) return;
   selfIp = ip;
+  paintSelfIp();
+}
+
+function paintSelfIp() {
   setMount("selfip", (el) => {
-    el.hidden = false;
-    el.innerHTML = "本机 tailnet 地址：<b class=\"mono\">" + esc(ip) + "</b>（对方发送时填这个）";
+    el.hidden = !selfIp;
+    el.innerHTML = "本机 tailnet 地址：<b class=\"mono\">" + esc(selfIp) + "</b>（对方发送时填这个）";
   });
 }
 
@@ -397,7 +431,7 @@ async function loadPeers() {
       // Saved targets still render below — only nag when there is nothing.
       if (!saved.length) {
         bannerShow(d.error + "。不影响接收；也可以直接输入对方 IP 发送。");
-        mount("peers").forEach((n) => { n.innerHTML = '<div class="empty">暂时无法读取节点列表</div>'; });
+        mount("peers").forEach((n) => { n.innerHTML = '<div class="empty">暂时无法读取设备列表</div>'; });
       }
       peers = [];
     } else {
@@ -406,6 +440,10 @@ async function loadPeers() {
         $("chip-self").innerHTML = "本机：<b>" + esc(d.self.name) + "</b>" +
           (d.self.ip ? ' <span class="mono">' + esc(d.self.ip) + "</span>" : "");
         if (d.self.ip) rememberSelfIp(d.self.ip);
+        if (selfName !== d.self.name) {
+          selfName = d.self.name;
+          setMount("self-name", (el) => { el.textContent = selfName; });
+        }
       }
       peers = d.peers || [];
     }
@@ -481,7 +519,7 @@ async function loadPeers() {
     renderPeers();
   } catch (e) {
     mount("peers").forEach((n) => { n.innerHTML = '<div class="empty">读取失败</div>'; });
-    toast("节点读取失败：" + e, "err");
+    toast("设备读取失败：" + e, "err");
   } finally {
     peersLoading = false;
     bindAll("peers-refresh", (b) => { b.disabled = false; });
@@ -490,59 +528,56 @@ async function loadPeers() {
 
 function renderPeers() {
   const ready = peers.filter((p) => p.recv === true || (p.recv === undefined && p.online)).length;
-  setMount("peers-count", (el) => { el.textContent = peers.length ? `${ready}/${peers.length} 可发送` : ""; });
+  setMount("peers-count", (el) => { el.textContent = peers.length ? `· ${ready}/${peers.length} 可发送` : ""; });
   const f = peerFilter.toLowerCase();
   const visible = f
     ? peers.filter((p) => (p.name || "").toLowerCase().includes(f) || (p.ip || "").toLowerCase().includes(f))
     : peers;
   if (!visible.length) {
-    const msg = peers.length ? "没有匹配的节点" : "tailnet 里没有其他节点";
+    const msg = peers.length ? "没有匹配的设备" : "tailnet 里还没有其他设备";
     mount("peers").forEach((el) => { el.innerHTML = `<div class="empty">${msg}</div>`; });
     return;
   }
-  // LED semantics: green = receiver up (sendable), amber = node online but
-  // its Tailsend isn't running, gray = node offline in tailscale. The hint
-  // text sits right in the row — no tooltip hunting.
-  const ledClass = (p) =>
-    p.recv === false && p.online ? "idle" : p.online || p.recv === true ? "" : "off";
-  const hint = (p) =>
-    p.recv === true ? '<span class="st-ok">可发送</span>'
-    : p.recv === false && p.online ? '<span class="st-idle">未运行</span>'
-    : p.online ? "在线" : "离线";
+  // 状态语义：绿点 = 对方 Tailsend 真能收（可发送）；琥珀 = 节点在线但对方
+  // Tailsend 没开；蓝 = 在线探测中；灰 = 离线。状态词做成名字行的小徽章。
+  const sClass = (p) =>
+    p.recv === true ? "s-ok" : p.recv === false && p.online ? "s-idle"
+    : p.online ? "s-on" : "s-probe";
+  const stat = (p) =>
+    p.recv === true ? '<i class="stat b-ok">可发送</i>'
+    : p.recv === false && p.online ? '<i class="stat b-idle">未运行</i>'
+    : p.online ? '<i class="stat b-on">在线</i>'
+    : '<i class="stat b-dim">离线</i>';
   const html = visible.map((p) => {
     const i = peers.indexOf(p);
     const sel = targets.some((t) => t.key === peerKey(p));
     return `
-    <div class="peer ${ledClass(p)} ${sel ? "sel" : ""} ${p.fresh ? "fresh" : ""}" data-i="${i}"
+    <div class="dev ${p.recv === true || p.online ? "" : "off"} ${sel ? "sel" : ""} ${p.fresh ? "fresh" : ""}"
+         data-i="${i}" role="button" tabindex="0" aria-pressed="${sel}"
          title="${esc(p.fqdn || p.name)} · ${esc(p.ip)}">
-      <i class="led" aria-hidden="true"></i>
-      <span class="meta">
-        <span class="name">${p.saved ? '<i class="star" title="收藏的目标">★</i>' : ""}${esc(p.name)}${sel ? '<i class="selmark">已选</i>' : ""}</span>
-        <span class="sub mono">${esc(p.ip)} · ${hint(p)}</span>
+      <span class="ava ${sClass(p)}" aria-hidden="true">${osAvatar(p.os)}<i class="dot"></i></span>
+      <span class="dmeta">
+        <span class="dname">${p.saved ? '<i class="star" title="常用设备">★</i>' : ""}<span class="nm">${esc(p.name)}</span></span>
+        <span class="dsub"><span class="ip mono">${esc(p.ip)}</span>${stat(p)}</span>
       </span>
-      <span class="os">${osIcon(p.os)}</span>
-      ${p.saved ? `<button class="fx-del" data-del="${esc(p.ip)}" title="取消收藏">✕</button>` : ""}
+      ${p.saved ? `<button class="fx-del" data-del="${esc(p.ip)}" title="移除常用">✕</button>` : ""}
+      <i class="ck" aria-hidden="true">✓</i>
     </div>`;
   }).join("");
   mount("peers").forEach((el) => { el.innerHTML = html; });
-  syncTargetUI();
 }
 
 function choosePeer(i) {
   const p = peers[i];
   if (!p) return;
+  // 离线设备点了也发不过去，直接拦在勾选这一步。
+  if (!p.online) { toast(`${p.name || p.ip} 离线，无法选择`, "err"); return; }
   const key = peerKey(p);
   const addr = p.ip || p.name;
   const hit = targets.find((t) => t.key === key);
-  if (multiSel) {
-    // 多选：点击把节点加入/移出目标集合（同地址只保留一条，避免重复投递）
-    targets = hit ? targets.filter((t) => t !== hit)
-      : [...targets.filter((t) => t.addr !== addr), { key, label: p.name, addr }];
-  } else if (hit && targets.length === 1) {
-    targets = []; // 再点一次已选节点 = 取消
-  } else {
-    targets = [{ key, label: p.name, addr }]; // 单选 = 整体替换（保留原切换手感）
-  }
+  // 勾选语义：点击在目标集合里加入/移出（同地址只保留一条，避免重复投递）
+  targets = hit ? targets.filter((t) => t !== hit)
+    : [...targets.filter((t) => t.addr !== addr), { key, label: p.name, addr }];
   $$(".manual-in").forEach((n) => { n.value = ""; });
   renderPeers();
   updateTargetUI();
@@ -552,14 +587,8 @@ function setManualTarget(input) {
   const v = (input && input.value || "").trim();
   if (!v) { toast("请输入对方的 IP 或主机名", "err"); return; }
   const hit = targets.find((t) => t.addr === v);
-  if (multiSel) {
-    targets = hit ? targets.filter((t) => t !== hit)
-      : [...targets.filter((t) => t.addr !== v), { key: "m|" + v, label: v, addr: v }];
-  } else if (hit && targets.length === 1) {
-    targets = [];
-  } else {
-    targets = [{ key: "m|" + v, label: v, addr: v }]; // 单选 = 整体替换
-  }
+  targets = hit ? targets.filter((t) => t !== hit)
+    : [...targets.filter((t) => t.addr !== v), { key: "m|" + v, label: v, addr: v }];
   if (!hit) saveTarget(v, v); // 只在真正加入时收藏；取消选择不把收藏复活
   $$(".manual-in").forEach((n) => { n.value = ""; });
   renderPeers();
@@ -580,62 +609,22 @@ async function saveReceiverToken(value) {
   }
 }
 
-const targetNames = () => targets.map((t) => t.label).join("、");
-
 function updateTargetUI() {
   const n = targets.length;
-  setMount("target-label", (el) => {
-    el.textContent = !n ? "未选择目标" : n === 1 ? "→ " + targets[0].label : `→ ${n} 个目标`;
+  const f = items.filter((i) => i.status === "ready").length;
+  setMount("sendline", (el) => {
+    el.textContent =
+      !n && !f ? "选择文件，再点下面的设备"
+      : !n ? `已选 ${f} 个文件 · 点下面的设备选发给谁`
+      : !f ? `将发给 ${n === 1 ? targets[0].label : n + " 台设备"} · 先添加文件`
+      : `发送 ${f} 个文件给 ${n === 1 ? targets[0].label : n + " 台设备"}`;
   });
-  setMount("strip-target", (el) => {
-    el.textContent = !n ? "选择目标" : n === 1 ? targets[0].label : `${targets[0].label} +${n - 1}`;
-    el.classList.toggle("set", n > 0);
-  });
-  bindAll("picker-done", (b) => { b.textContent = n > 1 ? `选好了（${n} 个目标）` : "选好了"; });
-  syncTargetUI();
   updateSendBtn();
-}
-
-// The mobile target card mirrors the selection with the best LED across
-// targets (green beats amber beats gray); the desktop targetbar is the
-// label above the link strip.
-function syncTargetUI() {
-  const selPeers = peers.filter((p) => targets.some((t) => t.key === peerKey(p)));
-  const best = !targets.length ? "x"
-    : selPeers.some((p) => p.recv === true) ? "g"
-    : selPeers.some((p) => p.online) ? "y" : "x";
-  $$(".targetcard").forEach((bar) => {
-    bar.classList.toggle("has", targets.length > 0);
-    bar.classList.remove("g", "y");
-    if (best === "g") bar.classList.add("g");
-    if (best === "y") bar.classList.add("y");
-  });
-  setMount("tc-name", (el) => {
-    el.textContent = !targets.length ? "选择发送目标"
-      : targets.length === 1 ? targets[0].label : `${targets.length} 个目标`;
-  });
-  setMount("tc-sub", (el) => {
-    el.textContent = !targets.length ? "点这里选节点（可多选），或输入对方 IP"
-      : targets.length === 1 ? targets[0].addr : targetNames();
-  });
 }
 
 function updateSendBtn() {
   const dis = sending || !targets.length || !items.some((i) => i.status === "ready");
   $$('[data-action="send"]').forEach((b) => { b.disabled = dis; });
-}
-
-/* ---------------------------------------------------------------- picker */
-
-function openPicker() {
-  $("picker").hidden = false;
-  $$(".targetcard").forEach((b) => b.setAttribute("aria-expanded", "true"));
-  loadPeers(); // fresh data the moment the picker opens
-}
-
-function closePicker() {
-  $("picker").hidden = true;
-  $$(".targetcard").forEach((b) => b.setAttribute("aria-expanded", "false"));
 }
 
 /* ---------------------------------------------------------------- tabs */
@@ -649,6 +638,41 @@ function setTab(tab) {
 
 /* ---------------------------------------------------------------- queue */
 
+// 系统文件图标：桌面端经 file_icons 命令取 Finder 同款 PNG（按扩展名缓存并
+// 持久化，同一类型只取一次）；取不到（移动端/旧后端）退回 FILE_ICONS 线稿。
+// 缓存存完整 data URL（Rust 只回裸 base64，<img src> 缺前缀会渲染成破图「?」）。
+// v3：v2 存过没加前缀的裸 base64，换键作废。
+const ICON_KEY = "ts.icons.v3";
+const iconCache = (() => {
+  try { return JSON.parse(localStorage.getItem(ICON_KEY)) || {}; }
+  catch { return {}; }
+})();
+let iconsUnavailable = false;
+const extOf = (name) => { const m = /\.([a-z0-9]+)$/i.exec(name || ""); return m ? m[1].toLowerCase() : ""; };
+
+async function fetchIcons(entries) {
+  if (iconsUnavailable) return;
+  const reps = new Map(); // ext -> 首个真实路径（iconForFile 按路径取图）
+  for (const e of entries) {
+    const k = extOf(e.rel) || "__none__";
+    if (k in iconCache || reps.has(k)) continue;
+    reps.set(k, e.path);
+  }
+  if (!reps.size) return;
+  const keys = [...reps.keys()];
+  const paths = keys.map((k) => reps.get(k));
+  try {
+    const res = await invoke("file_icons", { paths });
+    paths.forEach((p, idx) => { if (res && res[idx]) iconCache[keys[idx]] = "data:image/png;base64," + res[idx]; });
+    try {
+      const all = Object.keys(iconCache);
+      if (all.length > 48) all.slice(0, all.length - 48).forEach((k) => delete iconCache[k]);
+      localStorage.setItem(ICON_KEY, JSON.stringify(iconCache));
+    } catch { /* 私密模式存不了，内存缓存仍然有效 */ }
+    renderQueue();
+  } catch { iconsUnavailable = true; }
+}
+
 function addItem(entry) {
   if (items.some((i) => i.rel === entry.rel && i.size === entry.size)) return;
   items.push({
@@ -661,6 +685,7 @@ function addItem(entry) {
     loaded: 0,
   });
   renderQueue();
+  updateTargetUI();
   updateSendBtn();
 }
 
@@ -670,6 +695,7 @@ async function addFromPaths(paths) {
     const st = await invoke("stat_paths", { paths });
     st.forEach(addItem);
     if (!st.length) toast("所选位置没有文件", "err");
+    else fetchIcons(st);
   } catch (e) {
     toast("读取所选文件失败：" + e, "err");
   }
@@ -690,6 +716,7 @@ function addFromFile(f) {
     loaded: 0,
   });
   renderQueue();
+  updateTargetUI();
   updateSendBtn();
 }
 
@@ -697,26 +724,38 @@ function removeItem(id) {
   if (sending) return;
   items = items.filter((i) => i.id !== id);
   renderQueue();
+  updateTargetUI();
   updateSendBtn();
 }
 
 function renderQueue() {
+  const total = items.reduce((s, i) => s + i.size, 0);
+  setMount("queue-count", (el) => {
+    el.textContent = items.length ? `· ${items.length} 个 · ${fmtSize(total)}` : "";
+  });
   const html = items.map((i) => {
     const k = fileKind(i.rel);
+    const src = i.mode === "path" ? iconCache[extOf(i.rel) || "__none__"] : null;
     return `
     <li class="qi ${i.status}" data-id="${i.id}" title="${esc(i.rel)}">
-      <span class="itic k-${k}" aria-hidden="true">${FILE_ICONS[k]}</span>
+      <span class="itic k-${k}${src ? " sys" : ""}" aria-hidden="true">${src ? `<img src="${src}" alt="">` : FILE_ICONS[k]}</span>
       <span class="fmeta">
         <span class="frel">${esc(i.rel)}</span>
         <span class="fbar"><i style="width:${i.size ? (100 * i.loaded / i.size).toFixed(1) : 0}%"></i></span>
       </span>
       <span class="fsize">${i.status === "sending" ? fmtSize(i.loaded) + " / " : ""}${fmtSize(i.size)}</span>
-      <span class="fstate">${i.status === "done" ? "✓" : i.status === "error" ? "✗" : i.status === "sending" ? "↑" : ""}</span>
+      <span class="fstate">${i.status === "done" ? "✓" : i.status === "error" ? "✗" : ""}</span>
       ${!sending && i.status === "error" ? `<button class="fx retry" data-retry="${i.id}" title="重新发送">↻</button>` : ""}
       ${!sending && i.status !== "sending" ? `<button class="fx" data-x="${i.id}" title="移除">✕</button>` : ""}
     </li>`;
   }).join("");
-  mount("queue").forEach((el) => { el.innerHTML = html; });
+  mount("queue").forEach((el) => {
+    el.innerHTML = html;
+    /* 空队列整卡隐藏。不用 :has(.queue:empty)——WebKit 在内容从空变
+       非空时不重求 :has，卡片会一直 display:none，切页签才“出现”。 */
+    const panel = el.closest(".queue-panel");
+    if (panel) panel.hidden = items.length === 0;
+  });
 }
 
 function updateRow(item) {
@@ -733,7 +772,7 @@ function updateRow(item) {
 /* ------------------------------------------------------- incoming requests */
 
 let reqQueue = [];
-let reqCur = null; // { id, deadline }
+let reqCur = null; // { id }
 let reqTimer = null;
 
 function showRequest(p) {
@@ -745,27 +784,38 @@ function nextRequest() {
   const p = reqQueue.shift();
   if (!p) { reqCur = null; $("req-backdrop").hidden = true; return; }
   reqCur = { id: p.id };
-  $("req-sub").textContent = `来自 ${p.sender || "未知设备"} · ${p.count} 个文件 · ${fmtSize(p.total)}`;
+  $("req-letter").textContent = (p.sender || "?").trim().charAt(0).toUpperCase() || "?";
+  $("req-title").textContent = `${p.sender || "未知设备"} 想发给你 ${p.count} 个文件`;
+  $("req-sub").innerHTML = `约 ${fmtSize(p.total)} · <b id="req-timer">30</b> 秒内不确认将自动取消`;
   const list = $("req-files");
   const shown = (p.files || []).slice(0, 8);
   list.innerHTML = shown.map((f) => {
     const k = fileKind(f.name);
     return `<li><span class="itic k-${k}" aria-hidden="true">${FILE_ICONS[k]}</span><span class="rfn">${esc(f.name)}</span><span class="rfs">${fmtSize(f.size)}</span></li>`;
   }).join("") + (p.count > shown.length ? `<li class="rfmore">… 等共 ${p.count} 个文件</li>` : "");
+  const ring = $("req-ring");
+  ring.classList.remove("low");
+  const sub = $("req-sub");
+  sub.classList.remove("low");
+  setReqRing(30);
   $("req-backdrop").hidden = false;
   let left = 30;
-  $("req-timer").textContent = left;
-  $("req-timer").classList.remove("low");
   clearInterval(reqTimer);
   reqTimer = setInterval(() => {
     left -= 1;
-    $("req-timer").textContent = Math.max(left, 0);
-    if (left <= 10) $("req-timer").classList.add("low");
+    const t = $("req-timer");
+    if (t) t.textContent = Math.max(left, 0);
+    setReqRing(left);
+    if (left <= 10) { ring.classList.add("low"); sub.classList.add("low"); }
     if (left <= 0) { // UI 层关窗；接收端 30 秒未应答会自行取消授权
       clearInterval(reqTimer);
       dismissRequest();
     }
   }, 1000);
+}
+
+function setReqRing(left) {
+  $("req-ring").style.setProperty("--p", Math.max(0, Math.min(100, (100 * left) / 30)) + "%");
 }
 
 // Close without answering (timer ran out / request replaced): the receiver
@@ -835,8 +885,20 @@ async function sendData(item, addr, reqId = "") {
 
 async function send() {
   const ready = items.filter((i) => i.status === "ready");
-  if (!targets.length) { toast("先选择目标节点（可多选），或输入对方 IP", "err"); return; }
+  if (!targets.length) { toast("先点选下面的设备（可多选），或输入对方 IP", "err"); return; }
   if (!ready.length) { toast("没有要发送的文件", "err"); return; }
+  // 勾选后掉线的设备（手动输入的 IP 不在设备列表里，交给发送流程去报错）
+  const dead = targets.filter((t) => {
+    const p = peers.find((x) => peerKey(x) === t.key);
+    return p && !p.online;
+  });
+  if (dead.length) {
+    targets = targets.filter((t) => !dead.includes(t));
+    renderPeers();
+    updateTargetUI();
+    toast(`${dead.map((d) => d.label).join("、")} 已离线，已从本次发送移除`, "err");
+    if (!targets.length) return;
+  }
   sending = true;
   document.body.classList.add("sending");
   updateSendBtn();
@@ -892,7 +954,7 @@ async function send() {
       doneBytes += item.size;
       item.tried++;
       // perTarget is a snapshot on purpose: targets[] may change mid-send
-      // (multi-select is still live), and completion must not depend on it.
+      // (selection is still live), and completion must not depend on it.
       if (item.tried >= perTarget.length) {
         item.status = item.okN === item.tried ? "done" : "error";
         if (item.status === "error") item.error = "部分目标接收失败，详见提示";
@@ -907,6 +969,7 @@ async function send() {
   document.body.classList.remove("sending");
   setSendLabel("发送");
   renderQueue(); // 恢复各行 ✕（发送期间删除钮整体隐藏）
+  updateTargetUI();
   updateSendBtn();
   perTarget.forEach((x) => { if (x.ok > 0) saveTarget(x.t.addr, x.t.label); }); // remember where sends succeed
   const bad = perTarget.filter((x) => x.fail > 0).map((x) => x.t.label);
@@ -992,9 +1055,9 @@ async function loadInbox() {
 
 /* ---------------------------------------------------------------- wiring */
 
-// Bind a handler to every instance of a data-action control (both platform
-// skins render their own copy of shared controls). bindAll runs fn(el) once
-// per instance immediately — for state sync; onAll assigns it as onclick.
+// Bind a handler to every instance of a data-action control.
+// bindAll runs fn(el) once per instance immediately — for state sync;
+// onAll assigns it as onclick.
 function bindAll(action, fn) {
   $$(`[data-action="${action}"]`).forEach(fn);
 }
@@ -1002,16 +1065,6 @@ const onAll = (action, fn) => bindAll(action, (el) => { el.onclick = fn; });
 
 function wire() {
   bindAll("peers-refresh", (b) => { b.onclick = loadPeers; });
-  bindAll("multi", (b) => {
-    b.onclick = () => {
-      multiSel = !multiSel;
-      bindAll("multi", (x) => {
-        x.classList.toggle("on", multiSel);
-        x.setAttribute("aria-pressed", String(multiSel));
-      });
-      toast(multiSel ? "多选已开：点节点加入/移出目标" : "多选已关：点节点直接切换目标");
-    };
-  });
   bindAll("manual-use", (b) => {
     b.onclick = () => setManualTarget(b.closest(".manual").querySelector(".manual-in"));
   });
@@ -1021,18 +1074,10 @@ function wire() {
   bindAll("peer-search", (inp) => {
     inp.addEventListener("input", () => {
       peerFilter = inp.value.trim();
-      // keep sibling search boxes in sync
-      $$('[data-action="peer-search"]').forEach((o) => { if (o !== inp && o.value !== inp.value) o.value = inp.value; });
       renderPeers();
     });
   });
   bindAll("send", (b) => { b.onclick = send; });
-
-  // Mobile target card → full-screen picker.
-  onAll("open-picker", openPicker);
-  onAll("picker-close", closePicker);
-  onAll("picker-done", closePicker);
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("picker").hidden) closePicker(); });
 
   // Tabs.
   bindAll("tab", (b) => { b.onclick = () => setTab(b.dataset.tab); });
@@ -1040,14 +1085,12 @@ function wire() {
   onAll("open-inbox", async () => {
     try { await invoke("open_inbox"); } catch (e) { toast(String(e), "err"); }
   });
-  // Receiver token: optional shared secret senders must quote.
   // 确认接收开关（协议 v3）：默认开——收到的传输先确认再落盘。
   const applyConfirm = () => {
     let on = true;
     try { on = localStorage.getItem("ts.confirm.v1") !== "0"; } catch { /* ignore */ }
     bindAll("confirm", (b) => {
       b.setAttribute("aria-pressed", String(on));
-      b.classList.toggle("on", on && !b.classList.contains("switch"));
     });
   };
   applyConfirm();
@@ -1123,7 +1166,7 @@ function wire() {
       loadInbox();
     });
   });
-  // 节点行 + 队列行：同样委托（两个平台各有一份挂载点）
+  // 设备卡片：点选 + 键盘 + 移除常用（事件委托，网格整体重绘）
   mount("peers").forEach((el) => {
     el.addEventListener("click", (e) => {
       const del = e.target.closest(".fx-del");
@@ -1133,8 +1176,16 @@ function wire() {
         loadPeers();
         return;
       }
-      const row = e.target.closest(".peer");
+      const row = e.target.closest(".dev");
       if (row) choosePeer(+row.dataset.i);
+    });
+    el.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      const row = e.target.closest(".dev");
+      if (row) {
+        e.preventDefault();
+        choosePeer(+row.dataset.i);
+      }
     });
   });
   mount("queue").forEach((el) => {
@@ -1157,16 +1208,40 @@ function wire() {
     });
   });
 
+  /* macOS 的 NSOpenPanel 关闭后 WKWebView 的渲染管线可能整个停住：
+     DOM 已更新，但页面停在旧帧，直到下一个窗口事件才重绘。
+     style 层的强制合成唤不醒它，需要窗口层的刺激——
+     1px 尺寸抖动（肉眼无感）+ 焦点唤回，逼窗口系统重排重绘。 */
+  const repaint = async () => {
+    document.body.style.transform = "translateZ(0)";
+    void document.body.offsetHeight;
+    requestAnimationFrame(() => { document.body.style.transform = ""; });
+    try {
+      const W = window.__TAURI__ && window.__TAURI__.window;
+      if (W && W.getCurrentWindow && W.PhysicalSize) {
+        const w = W.getCurrentWindow();
+        const s = await w.outerSize();
+        if (s) {
+          await w.setSize(new W.PhysicalSize(s.width, s.height + 1));
+          await w.setSize(new W.PhysicalSize(s.width, s.height));
+        }
+        await w.setFocus();
+      }
+    } catch {}
+  };
+
   onAll("pick", async () => {
     try {
       const r = await invoke("pick_files");
       if (r && r.length) await addFromPaths(r);
+      repaint();
     } catch (e) { if (!/cancel/i.test(String(e))) toast(String(e), "err"); }
   });
   onAll("pickdir", async () => {
     try {
       const r = await invoke("pick_folders");
       if (r && r.length) await addFromPaths(r);
+      repaint();
     } catch (e) { if (!/cancel/i.test(String(e))) toast(String(e), "err"); }
   });
   onAll("inputfile", () => { $$(".file-in").forEach((i) => i.click()); });
@@ -1174,12 +1249,14 @@ function wire() {
     inp.addEventListener("change", (e) => {
       [...e.target.files].forEach(addFromFile);
       e.target.value = "";
+      repaint();
     });
   });
   $$(".dir-in").forEach((inp) => {
     inp.addEventListener("change", (e) => {
       [...e.target.files].forEach(addFromFile);
       e.target.value = "";
+      repaint();
     });
   });
 
@@ -1227,6 +1304,8 @@ function wire() {
   listen("incoming-request", (e) => showRequest(e.payload));
 
   setTab("send");
+  updateTargetUI();
+  paintSelfIp();
   loadStatus();
   loadPeers();
   loadInbox();
@@ -1242,7 +1321,6 @@ function wire() {
 
 let peers = [];
 let targets = []; // [{ key, label, addr }] — a send fans out to every entry (1:N)
-let multiSel = false; // multi-select mode: click adds/removes; off: click switches the lone target
 let items = [];
 let itemSeq = 0;
 let sending = false;

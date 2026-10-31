@@ -1,6 +1,6 @@
 [package]
 name = "tailsend"
-version = "0.2.0"
+version = "0.2.1"
 description = "Send files between your machines over Tailscale"
 edition = "2021"
 rust-version = "1.77"
@@ -36,3 +36,20 @@ tauri-plugin-tsnet = { path = "plugins/tsnet" }
 # Native file dialogs — desktop only; mobile uses the webview file picker.
 [target.'cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))'.dependencies]
 rfd = "0.15"
+
+# Finder-style file icons for the send queue (NSWorkspace → PNG → base64).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = { version = "0.6", default-features = false }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "NSBitmapImageRep",
+    "NSGraphics",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
+    "NSWorkspace",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "NSData",
+    "NSDictionary",
+    "NSString",
+] }

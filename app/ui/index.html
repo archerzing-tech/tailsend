@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="color-scheme" content="light dark" />
   <title>Tailsend</title>
   <link rel="stylesheet" href="app.css" />
 </head>
@@ -32,244 +33,199 @@
     </div>
     <div class="statusbar">
       <span class="seg" id="chip-self">本机：读取中…</span>
-      <i class="sep" aria-hidden="true"></i>
       <span class="seg" id="chip-recv"><i class="dot"></i>接收端检测中…</span>
-      <i class="sep" aria-hidden="true"></i>
       <span class="seg" id="chip-dir" hidden></span>
     </div>
   </header>
 
-  <main>
-    <div class="banner" id="banner" hidden></div>
-
-    <!-- ====================================================== 桌面布局 -->
-    <div class="layout-desktop">
-      <aside class="rail">
-        <div class="rail-head">
-          <h2>节点 <span class="count" data-mount="peers-count"></span></h2>
-          <div class="rail-btns">
-            <button class="ghost" data-action="multi" aria-pressed="false">多选</button>
-            <button class="ghost" data-action="peers-refresh">刷新</button>
-          </div>
-        </div>
-        <label class="search">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></svg>
-          <input data-action="peer-search" type="text" placeholder="搜索节点名或 IP" spellcheck="false" />
-        </label>
-        <div class="peers" data-mount="peers">
-          <div class="empty">正在读取节点…</div>
-        </div>
-        <p class="selfip" data-mount="selfip" hidden></p>
-        <div class="manual">
-          <input class="manual-in" data-action="manual-input" type="text" spellcheck="false"
-                 placeholder="输入对方 IP / 主机名 / IP:端口" />
-          <button class="ghost" data-action="manual-use">使用</button>
-        </div>
-      </aside>
-
-      <div class="deck">
-        <section class="card send-card">
-          <div class="card-head">
-            <h2>发送</h2>
-            <span class="target" data-mount="target-label">未选择目标</span>
-          </div>
-          <div class="linkstrip" data-mount="linkstrip" aria-hidden="true">
-            <span class="node self"><i class="ndot"></i>本机</span>
-            <span class="rail-line"><i class="packet p1"></i><i class="packet p2"></i><i class="packet p3"></i></span>
-            <span class="node target" data-mount="strip-target">选择目标</span>
-          </div>
-          <div class="drop" data-mount="drop">
-            <svg class="drop-glyph" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 15V4m0 0l-4 4m4-4l4 4" />
-              <path d="M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" />
-            </svg>
-            <div class="drop-copy">
-              <p class="drop-title">拖入文件或文件夹</p>
-              <p class="drop-hint">超过 1GB 的文件请用「选择文件」走原生通道</p>
-            </div>
-            <div class="drop-btns">
-              <button class="primary" data-action="pick">选择文件</button>
-              <button class="ghost" data-action="pickdir">文件夹</button>
-              <button class="ghost" data-action="inputfile">界面选择</button>
-            </div>
-            <input type="file" class="file-in" multiple hidden />
-            <input type="file" class="dir-in" webkitdirectory multiple hidden />
-          </div>
-          <ul class="queue" data-mount="queue"></ul>
-          <div class="sendbar">
-            <div class="overall">
-              <div class="obar"><i data-mount="ofill"></i></div>
-              <span class="otext" data-mount="otext"></span>
-            </div>
-            <button class="primary send" data-action="send" disabled>发送</button>
-          </div>
-        </section>
-
-        <section class="card inbox-card">
-          <div class="card-head">
-            <h2>收件箱 <span class="count" data-mount="inbox-count"></span></h2>
-            <div class="head-btns">
-              <button class="ghost" data-action="confirm" aria-pressed="true"
-                      title="开启时，收到的传输要先确认才会开始">确认接收</button>
-              <button class="ghost" data-action="token" aria-expanded="false">令牌</button>
-              <button class="ghost" data-action="open-inbox">打开文件夹</button>
-            </div>
-          </div>
-          <div class="token-row" data-mount="token-row" hidden>
-            <input class="rx-token" type="password" spellcheck="false" autocomplete="off"
-                   placeholder="接收令牌（留空 = 不校验，发信方需填同一个）" />
-            <button class="ghost" data-action="token-save">保存</button>
-          </div>
-          <ul class="inbox" data-mount="inbox"></ul>
-        </section>
-      </div>
-    </div>
-
-    <!-- ====================================================== 移动布局 -->
-    <div class="layout-mobile">
-      <section class="view" id="view-send">
-        <div class="guard" data-mount="send-guard" hidden></div>
-        <button class="targetcard" data-action="open-picker" aria-expanded="false">
-          <i class="led" data-mount="tc-led" aria-hidden="true"></i>
-          <span class="tc-meta">
-            <span class="tc-name" data-mount="tc-name">选择发送目标</span>
-            <span class="tc-sub mono" data-mount="tc-sub">点这里选节点，或输入对方 IP</span>
-          </span>
-          <svg class="tc-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
-        </button>
-        <div class="drop" data-mount="drop">
-          <svg class="drop-glyph" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 15V4m0 0l-4 4m4-4l4 4" />
-            <path d="M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" />
-          </svg>
-          <div class="drop-copy">
-            <p class="drop-title">添加要发送的文件</p>
-            <p class="drop-hint">支持一次多选；超过 1GB 请用「选择文件」</p>
-          </div>
-          <div class="drop-btns">
-            <button class="primary" data-action="pick">选择文件</button>
-            <button class="ghost" data-action="pickdir">文件夹</button>
-            <button class="ghost" data-action="inputfile">界面选择</button>
-          </div>
-          <input type="file" class="file-in" multiple hidden />
-          <input type="file" class="dir-in" webkitdirectory multiple hidden />
-        </div>
-        <ul class="queue" data-mount="queue"></ul>
-        <div class="sendbar">
-          <div class="overall">
-            <div class="obar"><i data-mount="ofill"></i></div>
-            <span class="otext" data-mount="otext"></span>
-          </div>
-          <button class="primary send" data-action="send" disabled>发送</button>
-        </div>
-      </section>
-
-      <section class="view" id="view-recv">
-        <section class="card recv-ctl">
-          <div class="recv-master">
-            <div class="rm-copy">
-              <b>接收文件</b>
-              <p class="rm-meta" data-mount="recv-meta">检测中…</p>
-            </div>
-            <button class="switch" data-action="recv-master" aria-pressed="false" aria-label="开启或关闭接收"></button>
-          </div>
-          <div class="recv-row">
-            <span class="rr-label">每次接收前先确认<i class="rr-sub">关闭后收到传输直接落盘</i></span>
-            <button class="switch" data-action="confirm" data-kind="ok" aria-pressed="true" aria-label="接收前确认"></button>
-          </div>
-          <div class="recv-row">
-            <span class="rr-label">接收令牌<i class="rr-sub">发信方需填写同一个令牌</i></span>
-            <button class="ghost" data-action="token" aria-expanded="false">设置</button>
-          </div>
-          <div class="token-row" data-mount="token-row" hidden>
-            <input class="rx-token" type="password" spellcheck="false" autocomplete="off"
-                   placeholder="接收令牌（留空 = 不校验）" />
-            <button class="ghost" data-action="token-save">保存</button>
-          </div>
-          <button class="ghost wide" data-action="open-inbox">打开收件文件夹</button>
-          <p class="recv-hint" data-mount="recv-hint" hidden></p>
-        </section>
-        <section class="card">
-          <div class="card-head">
-            <h2>收件箱 <span class="count" data-mount="inbox-count"></span></h2>
-          </div>
-          <ul class="inbox" data-mount="inbox"></ul>
-        </section>
-      </section>
-
-      <section class="view" id="view-node">
-        <section class="card node-card" data-mount="node-card" hidden>
-          <div class="card-head">
-            <h2>内置节点</h2>
-            <span class="target" data-mount="node-state"></span>
-          </div>
-          <div class="node-body" data-mount="node-body"></div>
-        </section>
-        <p class="selfip" data-mount="selfip" hidden></p>
-      </section>
-    </div>
-  </main>
-
-  <!-- ====================================================== 移动 Tab 栏 -->
-  <nav class="tabbar">
+  <!-- 桌面侧栏：发送 / 接收 / 本机 -->
+  <nav class="sidebar" aria-label="页面">
     <button data-action="tab" data-tab="send" aria-pressed="true">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0l-4.5 4.5M12 4l4.5 4.5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 3.6 9.8c-.9.35-.86 1.63.06 1.93l6.44 2.1 2.2 6.3c.3.9 1.6.9 1.9 0L21 3Z"/><path d="m10.1 13.8 4-4"/></svg>
       <span>发送</span>
     </button>
     <button data-action="tab" data-tab="recv" aria-pressed="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m0 0l4.5-4.5M12 16l-4.5-4.5"/><path d="M4 15v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3"/></svg>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10m0 0 4-4m-4 4-4-4"/><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
       <span>接收</span>
       <i class="badge" data-mount="badge-inbox" hidden></i>
     </button>
-    <button data-action="tab" data-tab="node" aria-pressed="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 0 1 8.6 4.9M12 22a10 10 0 0 1-8.6-4.9"/><path d="M5 5.4a10 10 0 0 1 6-2.4M13 21a10 10 0 0 0 6-2.4" opacity=".4"/></svg>
-      <span>节点</span>
+    <button data-action="tab" data-tab="self" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="5" width="15" height="10.5" rx="2"/><path d="M2.5 18.5h19"/></svg>
+      <span>本机</span>
+    </button>
+  </nav>
+
+  <main>
+    <div class="banner" id="banner" hidden></div>
+
+    <!-- ====================================================== 发送 -->
+    <section class="view" id="view-send">
+      <div class="guard" data-mount="send-guard" hidden></div>
+
+      <section class="drop" data-mount="drop">
+        <svg class="drop-glyph" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 15V4m0 0l-4 4m4-4l4 4" />
+          <path d="M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3" />
+        </svg>
+        <div class="drop-copy">
+          <p class="drop-title">拖入文件或文件夹</p>
+          <p class="drop-hint">超过 1GB 的文件请用「选择文件」走原生通道</p>
+        </div>
+        <div class="drop-btns">
+          <button class="primary" data-action="pick">选择文件</button>
+          <button class="ghost" data-action="pickdir">文件夹</button>
+          <button class="ghost" data-action="inputfile">界面选择</button>
+        </div>
+        <input type="file" class="file-in" multiple hidden />
+        <input type="file" class="dir-in" webkitdirectory multiple hidden />
+      </section>
+
+      <section class="panel queue-panel" hidden>
+        <div class="panel-head">
+          <h2>待发送 <span class="count" data-mount="queue-count"></span></h2>
+        </div>
+        <ul class="queue" data-mount="queue"></ul>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>设备 <span class="count" data-mount="peers-count"></span></h2>
+          <div class="panel-tools">
+            <label class="search">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></svg>
+              <input data-action="peer-search" type="text" placeholder="搜索名称或 IP" spellcheck="false" />
+            </label>
+            <button class="ghost icon" data-action="peers-refresh" title="重新扫描" aria-label="重新扫描">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v4h-4"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="devs" data-mount="peers">
+          <div class="empty">正在读取设备…</div>
+        </div>
+        <div class="manual">
+          <input class="manual-in" data-action="manual-input" type="text" spellcheck="false"
+                 placeholder="添加对方的 IP / 主机名 / IP:端口" />
+          <button class="ghost" data-action="manual-use">添加</button>
+        </div>
+      </section>
+
+      <div class="sendbar">
+        <div class="overall">
+          <div class="obar"><i data-mount="ofill"></i></div>
+          <span class="otext" data-mount="otext"></span>
+        </div>
+        <span class="sendline" data-mount="sendline">选择文件，再点下面的设备</span>
+        <button class="primary send" data-action="send" disabled>发送</button>
+      </div>
+    </section>
+
+    <!-- ====================================================== 接收 -->
+    <section class="view" id="view-recv">
+      <section class="hero">
+        <div class="radar" aria-hidden="true">
+          <i></i><i></i><i></i>
+          <svg class="radar-mark" viewBox="0 0 24 24"><path d="M12 3v10m0 0 4-4m-4 4-4-4"/><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
+        </div>
+        <div class="hero-copy">
+          <p class="h-state" data-mount="recv-meta">检测中…</p>
+          <p class="h-dir" data-mount="recv-hint" hidden></p>
+        </div>
+        <div class="hero-actions">
+          <button class="ghost" data-action="open-inbox">打开文件夹</button>
+          <button class="switch" data-action="recv-master" aria-pressed="false" aria-label="开启或关闭接收"></button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head">
+          <h2>收到的文件 <span class="count" data-mount="inbox-count"></span></h2>
+        </div>
+        <ul class="inbox" data-mount="inbox"></ul>
+      </section>
+    </section>
+
+    <!-- ====================================================== 本机 -->
+    <section class="view" id="view-self">
+      <section class="panel">
+        <div class="me">
+          <span class="ava me-ava" aria-hidden="true">
+            <svg viewBox="0 0 1024 1024"><use href="#bird"/></svg>
+          </span>
+          <div class="me-meta">
+            <b class="me-name" data-mount="self-name">本机</b>
+            <p class="me-sub"><span data-mount="self-ver"></span></p>
+          </div>
+        </div>
+        <p class="selfip" data-mount="selfip" hidden></p>
+      </section>
+
+      <section class="panel" data-mount="node-card" hidden>
+        <div class="panel-head">
+          <h2>内置节点</h2>
+          <span class="target" data-mount="node-state"></span>
+        </div>
+        <div class="node-body" data-mount="node-body"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-head"><h2>接收设置</h2></div>
+        <div class="set-row">
+          <span class="set-label">接收前先确认<b class="set-sub">关闭后收到的传输直接保存，不再询问</b></span>
+          <button class="switch" data-action="confirm" aria-pressed="true" aria-label="接收前确认"></button>
+        </div>
+        <div class="set-row">
+          <span class="set-label">接收令牌<b class="set-sub">发送方需填写相同的令牌才能发送</b></span>
+          <button class="ghost" data-action="token" aria-expanded="false">设置</button>
+        </div>
+        <div class="token-row" data-mount="token-row" hidden>
+          <input class="rx-token" type="password" spellcheck="false" autocomplete="off"
+                 placeholder="接收令牌（留空 = 不校验）" />
+          <button class="ghost" data-action="token-save">保存</button>
+        </div>
+        <button class="ghost wide" data-action="open-inbox">打开收件文件夹</button>
+      </section>
+    </section>
+  </main>
+
+  <!-- 移动 Tab 栏 -->
+  <nav class="tabbar" aria-label="页面">
+    <button data-action="tab" data-tab="send" aria-pressed="true">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 3 3.6 9.8c-.9.35-.86 1.63.06 1.93l6.44 2.1 2.2 6.3c.3.9 1.6.9 1.9 0L21 3Z"/><path d="m10.1 13.8 4-4"/></svg>
+      <span>发送</span>
+    </button>
+    <button data-action="tab" data-tab="recv" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v10m0 0 4-4m-4 4-4-4"/><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
+      <span>接收</span>
+      <i class="badge" data-mount="badge-inbox" hidden></i>
+    </button>
+    <button data-action="tab" data-tab="self" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="5" width="15" height="10.5" rx="2"/><path d="M2.5 18.5h19"/></svg>
+      <span>本机</span>
       <i class="ndot" data-mount="badge-node" aria-hidden="true"></i>
     </button>
   </nav>
 
-  <!-- ====================================================== 移动全屏目标选择器 -->
-  <div class="picker" id="picker" hidden>
-    <header class="picker-head">
-      <button class="ghost" data-action="picker-close">取消</button>
-      <b>选择发送目标</b>
-      <button class="primary slim" data-action="picker-done">选好了</button>
-    </header>
-    <label class="search">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></svg>
-      <input data-action="peer-search" type="text" placeholder="搜索节点名或 IP" spellcheck="false" />
-    </label>
-    <div class="picker-tools">
-      <button class="ghost" data-action="multi" aria-pressed="false">多选</button>
-      <button class="ghost" data-action="peers-refresh">刷新</button>
-      <span class="count" data-mount="peers-count"></span>
-    </div>
-    <div class="peers grow" data-mount="peers">
-      <div class="empty">正在读取节点…</div>
-    </div>
-    <div class="picker-foot">
-      <div class="manual">
-        <input class="manual-in" data-action="manual-input" type="text" spellcheck="false"
-               placeholder="输入对方 IP / 主机名 / IP:端口" />
-        <button class="ghost" data-action="manual-use">使用</button>
-      </div>
-      <p class="selfip flat" data-mount="selfip" hidden></p>
-    </div>
-  </div>
-
-  <!-- ====================================================== 收发确认弹窗 -->
+  <!-- 收到传输请求：会话式确认 -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <g id="bird">
+        <rect x="100" y="100" width="824" height="824" rx="185" fill="#fff" />
+        <g transform="translate(-64, 35)">
+          <path d="M 445 505 L 302 632 L 462 672 Z" fill="#2450c8" />
+          <path d="M 748 455 C 735 372 668 315 590 318 C 505 322 448 385 438 470 C 434 508 428 546 412 580 C 405 595 396 609 388 620 C 410 656 472 690 548 690 C 650 688 722 620 748 535 C 756 508 752 480 748 455 Z" fill="#2e5bf0" />
+          <path d="M 745 398 L 838 442 L 745 488 Z" fill="#ffb13d" stroke="#ffb13d" stroke-width="26" stroke-linejoin="round" />
+          <circle cx="652" cy="392" r="40" fill="#ffffff" />
+          <circle cx="663" cy="397" r="19" fill="#101a2c" />
+        </g>
+      </g>
+    </defs>
+  </svg>
   <div class="req-backdrop" id="req-backdrop" hidden>
     <div class="req-card" role="dialog" aria-modal="true" aria-labelledby="req-title">
-      <div class="req-head">
-        <span class="req-badge" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>
-        </span>
-        <div class="req-who">
-          <h3 id="req-title">收到传输请求</h3>
-          <p class="req-sub" id="req-sub"></p>
-        </div>
-        <span class="req-timer" id="req-timer">30</span>
-      </div>
+      <div class="req-ring" id="req-ring"><span class="req-letter" id="req-letter"></span></div>
+      <h3 id="req-title">收到传输请求</h3>
+      <p class="req-sub" id="req-sub"></p>
       <ul class="req-files" id="req-files"></ul>
       <div class="req-btns">
         <button class="ghost" id="req-deny">拒绝</button>

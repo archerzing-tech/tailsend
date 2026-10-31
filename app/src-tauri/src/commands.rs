@@ -228,6 +228,67 @@ pub async fn stat_paths(paths: Vec<String>) -> Result<Vec<Entry>, String> {
         .map_err(|e| e.to_string())?
 }
 
+// 队列卡片用 Finder 同款图标：NSWorkspace 按真实路径取系统图标，画进
+// 128px 位图（64pt @2x，PNG 只有几 KB，缓存友好）再转 base64。
+// AppKit 的图标解析必须跑在主线程——后台线程拿到的一律是通用「?」文档——
+// 所以经 run_on_main_thread 执行，用 channel 把结果带回来。
+#[tauri::command]
+pub fn file_icons(window: tauri::WebviewWindow, paths: Vec<String>) -> Vec<Option<String>> {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{
+            NSBitmapImageFileType, NSBitmapImageRep, NSCompositingOperation, NSDeviceRGBColorSpace,
+            NSGraphicsContext, NSWorkspace,
+        };
+        use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSString, NSSize};
+
+        let n = paths.len();
+        let (tx, rx) = std::sync::mpsc::channel();
+        if window
+            .run_on_main_thread(move || {
+                use objc2::AnyThread;
+                let draw = |p: &str| -> Option<String> {
+                    let icon = NSWorkspace::sharedWorkspace().iconForFile(&NSString::from_str(p));
+                    let rep = unsafe {
+                        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                            NSBitmapImageRep::alloc(),
+                            std::ptr::null_mut(),
+                            128, 128, 8, 4, true, false,
+                            NSDeviceRGBColorSpace,
+                            0, 0,
+                        )
+                    }?;
+                    let prev = NSGraphicsContext::currentContext();
+                    let ctx = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep)?;
+                    NSGraphicsContext::setCurrentContext(Some(&ctx));
+                    icon.drawInRect_fromRect_operation_fraction(
+                        NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(64.0, 64.0)),
+                        NSRect::ZERO,
+                        NSCompositingOperation::SourceOver,
+                        1.0,
+                    );
+                    NSGraphicsContext::setCurrentContext(prev.as_deref());
+                    let empty = NSDictionary::new();
+                    let png = unsafe {
+                        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &empty)
+                    }?;
+                    Some(base64::engine::general_purpose::STANDARD.encode(png.to_vec()))
+                };
+                let _ = tx.send(paths.iter().map(|p| draw(p.as_str())).collect::<Vec<_>>());
+            })
+            .is_err()
+        {
+            return vec![None; n];
+        }
+        rx.recv().unwrap_or_else(|_| vec![None; n])
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        vec![None; paths.len()]
+    }
+}
+
 // One consent round trip per target: the whole batch is confirmed together
 // so a multi-file send pops a single dialog, not one per file. Returns the
 // grant id ("" when the receiver predates consent) for the send calls below.

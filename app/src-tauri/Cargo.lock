@@ -3666,7 +3666,7 @@ dependencies = [
 
 [[package]]
 name = "tailsend"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3675,6 +3675,9 @@ dependencies = [
  "dirs 5.0.1",
  "futures-util",
  "hostname",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "percent-encoding",
  "reqwest 0.12.28",
  "rfd",

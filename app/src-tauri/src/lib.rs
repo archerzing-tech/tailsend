@@ -23,6 +23,7 @@ pub fn run() {
             commands::pick_files,
             commands::pick_folders,
             commands::stat_paths,
+            commands::file_icons,
             commands::send_files,
             commands::send_data_begin,
             commands::send_data_chunk,
