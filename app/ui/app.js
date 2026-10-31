@@ -552,7 +552,7 @@ function renderPeers() {
     const i = peers.indexOf(p);
     const sel = targets.some((t) => t.key === peerKey(p));
     return `
-    <div class="dev ${p.recv === true || p.online ? "" : "off"} ${sel ? "sel" : ""} ${p.fresh ? "fresh" : ""}"
+    <div class="dev ${p.recv === true || (p.online && p.recv !== false) ? "" : "off"} ${sel ? "sel" : ""} ${p.fresh ? "fresh" : ""}"
          data-i="${i}" role="button" tabindex="0" aria-pressed="${sel}"
          title="${esc(p.fqdn || p.name)} · ${esc(p.ip)}">
       <span class="ava ${sClass(p)}" aria-hidden="true">${osAvatar(p.os)}<i class="dot"></i></span>
@@ -571,7 +571,12 @@ function choosePeer(i) {
   const p = peers[i];
   if (!p) return;
   // 离线设备点了也发不过去，直接拦在勾选这一步。
-  if (!p.online) { toast(`${p.name || p.ip} 离线，无法选择`, "err"); return; }
+  // 未就绪的设备点了也发不过去：离线（灰）与「未运行」（对方 Tailsend 没开，
+  // 琥珀）都拦在勾选这一步；「在线探测中」是暂态，放行让探测收敛。
+  if (!p.online || p.recv === false) {
+    toast(`${p.name || p.ip} ${p.online ? "的 Tailsend 未运行" : "离线"}，无法选择`, "err");
+    return;
+  }
   const key = peerKey(p);
   const addr = p.ip || p.name;
   const hit = targets.find((t) => t.key === key);
@@ -887,10 +892,11 @@ async function send() {
   const ready = items.filter((i) => i.status === "ready");
   if (!targets.length) { toast("先点选下面的设备（可多选），或输入对方 IP", "err"); return; }
   if (!ready.length) { toast("没有要发送的文件", "err"); return; }
-  // 勾选后掉线的设备（手动输入的 IP 不在设备列表里，交给发送流程去报错）
+  // 勾选后掉线/对方停了 Tailsend 的设备（手动输入的 IP 不在设备列表里，
+  // 交给发送流程去报错；探测中的暂态不拦）
   const dead = targets.filter((t) => {
     const p = peers.find((x) => peerKey(x) === t.key);
-    return p && !p.online;
+    return p && (!p.online || p.recv === false);
   });
   if (dead.length) {
     targets = targets.filter((t) => !dead.includes(t));
