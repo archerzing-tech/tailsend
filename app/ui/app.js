@@ -944,7 +944,7 @@ function fileKind(name) {
 
 // 两次点击确认：第一次点亮为「确认删除」，2.6 秒内再点才真删
 let armedDelete = null;
-let lastInboxKey = "";
+let lastInboxKey = null; // 空 inbox 的 key 是 ""，初始必须不同才能画出空态文案
 
 const inboxKey = (files) =>
   files.map((f) => `${f.incoming ? "~" : "+"}${f.path} ${f.size} ${f.mtime}`).join("|");
