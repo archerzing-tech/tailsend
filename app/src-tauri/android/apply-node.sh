@@ -11,13 +11,14 @@ AAR="$LIBS/tailsend-mobile.aar"
 
 mkdir -p "$LIBS"
 
-if ! command -v gomobile >/dev/null 2>&1; then
-  echo "gomobile not found — installing (needs Go toolchain)" >&2
+if ! command -v gomobile >/dev/null 2>&1 || ! command -v gobind >/dev/null 2>&1; then
+  echo "gomobile/gobind not found — installing (needs Go toolchain)" >&2
   go install golang.org/x/mobile/cmd/gomobile@latest
-  GOFLAGS= go -C "$ROOT" get -tool golang.org/x/mobile/cmd/gobind 2>/dev/null || true
+  go install golang.org/x/mobile/cmd/gobind@latest
 fi
 export PATH="$HOME/go/bin:$PATH"
-command -v gobind >/dev/null 2>&1 || { echo "gobind missing — run: go get -tool golang.org/x/mobile/cmd/gobind" >&2; exit 1; }
+command -v gomobile >/dev/null 2>&1 || { echo "gomobile missing after install" >&2; exit 1; }
+command -v gobind >/dev/null 2>&1 || { echo "gobind missing after install" >&2; exit 1; }
 
 echo "gomobile bind → $AAR (a few minutes on a cold cache)"
 (cd "$ROOT" && gomobile bind -target=android -androidapi 24 -o "$AAR" ./mobile)
