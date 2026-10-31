@@ -1,4 +1,7 @@
 // Tailsend UI — talks to the Rust core through Tauri commands and events.
+// One DOM serves both platforms: desktop (rail + deck) and mobile (three
+// tabs). Shared blocks render into every [data-mount] instance; controls
+// carry data-action so one handler drives both skins.
 const T = window.__TAURI__;
 const invoke = T.core.invoke;
 const listen = T.event.listen;
@@ -8,15 +11,11 @@ const DATA_CAP = 1024 * 1024 * 1024;
 const CHUNK = 1024 * 1024;
 
 const $ = (id) => document.getElementById(id);
+const $$ = (sel) => [...document.querySelectorAll(sel)];
+const mount = (name) => $$(`[data-mount="${name}"]`);
+const setMount = (name, fn) => mount(name).forEach(fn);
 
-let peers = [];
-let targets = []; // [{ key, label, addr }] — a send fans out to every entry (1:N)
-let multiSel = false; // multi-select mode: click adds/removes; off: click switches the lone target
-let items = [];
-let itemSeq = 0;
-let sending = false;
-const pendingBatch = new Map(); // batch id -> { item, res, rej }
-const knownInbox = new Set();
+let platform = "desktop";
 
 /* ---------------------------------------------------------------- utils */
 
@@ -48,7 +47,26 @@ const OS_ICON = {
 };
 const osIcon = (os) => OS_ICON[os] || "🖥";
 
+/* ------------------------------------------------------------- platform */
+
+async function detectPlatform() {
+  try {
+    const q = new URLSearchParams(location.search).get("platform");
+    const saved = (() => { try { return localStorage.getItem("ts.platform.v1"); } catch { return null; } })();
+    if (q || saved) {
+      platform = q || saved;
+    } else {
+      // The embedded node answers only on Android; the desktop stub rejects.
+      try { await invoke("node_status"); platform = "mobile"; }
+      catch { platform = "desktop"; }
+    }
+  } catch { platform = "desktop"; }
+  document.body.dataset.platform = platform;
+}
+
 /* ---------------------------------------------------------------- status */
+
+let recvSaveDir = "";
 
 async function loadStatus() {
   try {
@@ -68,10 +86,17 @@ async function loadStatus() {
       b.onclick = retryReceiver;
       chip.appendChild(b);
     }
-    const dir = $("chip-dir");
-    dir.hidden = false;
-    dir.title = r.save_dir;
-    dir.textContent = "保存到 " + r.save_dir;
+    recvSaveDir = r.save_dir || "";
+    setMount("recv-hint", (el) => {
+      el.hidden = !recvSaveDir;
+      el.textContent = "文件保存在 " + recvSaveDir;
+    });
+    if (platform === "desktop") {
+      const dir = $("chip-dir");
+      dir.hidden = false;
+      dir.title = r.save_dir;
+      dir.textContent = "保存到 " + r.save_dir;
+    }
     bannerHide();
   } catch (e) {
     toast("状态获取失败：" + e, "err");
@@ -103,7 +128,8 @@ function bannerHide() {
 
 /* ---------------------------------------------------------- embedded node */
 // The Android build can run its own tailnet node (no official Tailscale app
-// needed). Desktop has no node: node_status errors there and the card hides.
+// needed). Desktop has no node: node_status errors there, so the platform
+// reads as desktop and every node UI stays dark.
 
 let nodeStatus = null;
 let nodeRunning = false; // running → sends and peer probes route through Go
@@ -121,58 +147,127 @@ async function pollNode() {
   try { st = await invoke("node_status"); } catch { /* desktop: no node */ }
   nodeStatus = st || null;
   nodeRunning = !!st && st.state === "running";
-  renderNode();
+  syncNodeUI();
 }
 
-function nodeBind(id, fn) {
-  const el = $(id);
-  if (el) el.onclick = fn;
+function nodeErr(e) { toast(String((e && e.message) || e), "err"); }
+
+async function nodeEnsure() {
+  try { await invoke("node_ensure"); } catch (e) { nodeErr(e); }
+  pollNode();
 }
 
-function renderNode() {
-  const card = $("node-card");
-  if (!nodeStatus) { card.hidden = true; return; }
-  card.hidden = false;
+async function nodeLogin() {
+  try { await invoke("node_open_login"); } catch (e) { nodeErr(e); }
+}
+
+async function nodeToggleRecv() {
   const st = nodeStatus;
-  const state = st.state || "off";
-  $("node-state").textContent = nodeVerbs[state] || state;
-  const body = $("node-body");
-  if (state === "off") {
-    body.innerHTML = `
-      <p class="node-hint">登录后这台手机本身就是 tailnet 节点，不装官方 Tailscale 也能收发。协议与桌面端完全一致。</p>
-      <div class="node-actions"><button class="primary" id="node-start">启动内置节点</button></div>`;
-    nodeBind("node-start", () => invoke("node_ensure").then(pollNode).catch((e) => toast(String((e && e.message) || e), "err")));
-  } else if (state === "starting") {
-    body.innerHTML = `<p class="node-hint">正在启动，一般几秒内完成…</p>`;
-  } else if (state === "needs_login") {
-    body.innerHTML = `
-      <p class="node-hint">在浏览器里完成 Tailscale 授权后，这里会自动变成「已连接」。</p>
-      <div class="node-actions"><button class="primary" id="node-login">打开浏览器登录</button></div>`;
-    nodeBind("node-login", () => invoke("node_open_login").catch((e) => toast(String((e && e.message) || e), "err")));
-  } else if (state === "running") {
-    const recvOn = st.receiver === "on";
-    body.innerHTML = `
-      <p class="node-meta">本机节点 <b class="mono">${esc(st.ip || "")}</b>${st.tailnet ? " · " + esc(st.tailnet) : ""}</p>
-      <div class="node-actions">
-        <button class="${recvOn ? "ghost" : "primary"}" id="node-recv">${recvOn ? "关闭接收" : "开启接收"}</button>
-      </div>
-      <p class="node-hint">接收的文件保存在应用目录的 inbox 里，收件箱列表会自动合并显示。</p>`;
-    nodeBind("node-recv", async () => {
-      const t = localStorage.getItem("ts.token.v1") || "";
-      const confirm = localStorage.getItem("ts.confirm.v1") !== "0";
-      try {
-        if (recvOn) await invoke("node_stop_receiver");
-        else await invoke("node_start_receiver", { token: t, confirm });
-        toast(recvOn ? "内置节点接收已关闭" : "内置节点接收已开启，收件地址 " + (st.ip || "") + ":4782", "ok");
-      } catch (e) { toast(String((e && e.message) || e), "err"); }
-      pollNode();
+  const recvOn = !!st && st.state === "running" && st.receiver === "on";
+  const t = localStorage.getItem("ts.token.v1") || "";
+  const confirm = localStorage.getItem("ts.confirm.v1") !== "0";
+  try {
+    if (recvOn) await invoke("node_stop_receiver");
+    else await invoke("node_start_receiver", { token: t, confirm });
+    toast(recvOn ? "接收已关闭" : "接收已开启，收件地址 " + ((st && st.ip) || "") + ":4782", "ok");
+  } catch (e) { nodeErr(e); }
+  pollNode();
+}
+
+// One sync paints every node-aware surface: node tab card, tab badge, the
+// send page guard, and the receive master switch.
+function syncNodeUI() {
+  const st = nodeStatus;
+  const state = st ? st.state || "off" : null;
+  const isMobile = platform === "mobile";
+
+  setMount("node-card", (el) => { el.hidden = !isMobile || !st; });
+
+  // Tab badge dot: gray off, amber busy/login, green running, red error.
+  setMount("badge-node", (el) => {
+    el.classList.remove("g", "y", "x", "pulse");
+    if (!isMobile || !st) return;
+    if (state === "running") el.classList.add("g");
+    else if (state === "error") el.classList.add("x");
+    else if (state === "needs_login" || state === "starting" || state === "off" && st) el.classList.add("y", "pulse");
+  });
+
+  // Send page guard: login/starting/error are preconditions on mobile.
+  const guards = mount("send-guard");
+  guards.forEach((el) => {
+    if (!isMobile || !st || state === "running") { el.hidden = true; el.innerHTML = ""; return; }
+    el.hidden = false;
+    el.classList.toggle("err", state === "error");
+    if (state === "off") {
+      el.innerHTML = `<span class="g-copy"><b>先启动内置节点</b>
+        <span class="g-sub">启动后这台手机就是 tailnet 节点，不装官方客户端也能收发</span></span>
+        <button class="primary" data-guard="ensure">启动节点</button>`;
+    } else if (state === "starting") {
+      el.innerHTML = `<span class="g-copy"><b>节点启动中…</b>
+        <span class="g-sub">一般几秒内完成</span></span>`;
+    } else if (state === "needs_login") {
+      el.innerHTML = `<span class="g-copy"><b>等待登录认证</b>
+        <span class="g-sub">在浏览器完成 Tailscale 授权后这里会自动就绪</span></span>
+        <button class="primary" data-guard="login">去登录</button>`;
+    } else if (state === "error") {
+      el.innerHTML = `<span class="g-copy"><b>节点出错</b>
+        <span class="g-sub">${esc(st.error || "未知错误")}</span></span>
+        <button class="ghost" data-guard="ensure">重试</button>`;
+    }
+    el.querySelectorAll("[data-guard]").forEach((b) => {
+      b.onclick = b.dataset.guard === "login" ? nodeLogin : nodeEnsure;
     });
-  } else if (state === "error") {
-    body.innerHTML = `
-      <p class="node-hint err">${esc(st.error || "节点出错")}</p>
-      <div class="node-actions"><button class="ghost" id="node-again">重试</button></div>`;
-    nodeBind("node-again", () => invoke("node_ensure").then(pollNode).catch(() => {}));
-  }
+  });
+
+  // Receive master switch + meta line.
+  setMount("recv-meta", (el) => {
+    el.classList.toggle("on", !!st && state === "running" && st.receiver === "on");
+    if (!isMobile || !st) { el.textContent = "内置节点未运行 · 在「节点」页启用"; return; }
+    if (state === "off") el.textContent = "内置节点未启用 · 在「节点」页启动";
+    else if (state === "starting") el.textContent = "节点启动中…";
+    else if (state === "needs_login") el.textContent = "需要先登录 · 在「节点」页登录";
+    else if (state === "error") el.textContent = "节点出错 · 在「节点」页重试";
+    else el.textContent = "接收中 · " + (st.ip || "") + ":4782";
+  });
+  bindAll("recv-master", (el) => {
+    const on = !!st && state === "running" && st.receiver === "on";
+    el.setAttribute("aria-pressed", String(on));
+    el.disabled = !st || (state !== "running");
+  });
+
+  setMount("node-state", (el) => { el.textContent = st ? (nodeVerbs[state] || state) : ""; });
+
+  // Node card body (mobile node tab).
+  mount("node-body").forEach((body) => {
+    if (!isMobile || !st) { body.innerHTML = ""; return; }
+    if (state === "off") {
+      body.innerHTML = `
+        <p class="node-hint">登录后这台手机本身就是 tailnet 节点，不装官方 Tailscale 也能收发。协议与桌面端完全一致。</p>
+        <div class="node-actions"><button class="primary" data-nact="ensure">启动内置节点</button></div>`;
+    } else if (state === "starting") {
+      body.innerHTML = `<p class="node-hint">正在启动，一般几秒内完成…</p>`;
+    } else if (state === "needs_login") {
+      body.innerHTML = `
+        <p class="node-hint">在浏览器里完成 Tailscale 授权后，这里会自动变成「已连接」。</p>
+        <div class="node-actions"><button class="primary" data-nact="login">打开浏览器登录</button></div>`;
+    } else if (state === "running") {
+      const recvOn = st.receiver === "on";
+      body.innerHTML = `
+        <p class="node-meta">本机节点 <b class="mono">${esc(st.ip || "")}</b>${st.tailnet ? " · " + esc(st.tailnet) : ""}</p>
+        <div class="node-actions">
+          <button class="${recvOn ? "ghost" : "primary"}" data-nact="recv">${recvOn ? "关闭接收" : "开启接收"}</button>
+        </div>
+        <p class="node-hint">接收的文件在「接收」页查看；收件箱会自动合并应用目录。</p>`;
+    } else if (state === "error") {
+      body.innerHTML = `
+        <p class="node-hint err">${esc(st.error || "节点出错")}</p>
+        <div class="node-actions"><button class="ghost" data-nact="ensure">重试</button></div>`;
+    }
+    body.querySelectorAll("[data-nact]").forEach((b) => {
+      const a = b.dataset.nact;
+      b.onclick = a === "ensure" ? nodeEnsure : a === "login" ? nodeLogin : nodeToggleRecv;
+    });
+  });
 }
 
 // Peer probe: through the embedded node when it is up, otherwise the system
@@ -189,6 +284,7 @@ async function pingTarget(addr) {
 // Track online transitions so a node that just came online can flash its row.
 const prevOnline = new Map(); // "ip|name" -> bool
 let peersLoading = false;
+let peerFilter = "";
 
 // Saved targets: mobile has no tailscale CLI, so there this list *is* the
 // peer list; on desktop it pins frequently-used nodes so they survive
@@ -257,11 +353,10 @@ function rememberSelfIp(ip) {
   try { localStorage.setItem("ts.myip", ip); } catch { /* ignore */ }
   if (selfIp === ip) return;
   selfIp = ip;
-  const el = $("selfip");
-  if (el) {
+  setMount("selfip", (el) => {
     el.hidden = false;
     el.innerHTML = "本机 tailnet 地址：<b class=\"mono\">" + esc(ip) + "</b>（对方发送时填这个）";
-  }
+  });
 }
 
 // ---------------------------------------------------------------- discovery
@@ -294,9 +389,7 @@ async function discoverViaPeers() {
 async function loadPeers() {
   if (peersLoading) return;
   peersLoading = true;
-  const btn = $("btn-peers-refresh");
-  if (btn) btn.disabled = true;
-  const el = $("peers");
+  bindAll("peers-refresh", (b) => { b.disabled = true; });
   try {
     const d = await invoke("list_peers");
     const saved = loadSaved();
@@ -304,7 +397,7 @@ async function loadPeers() {
       // Saved targets still render below — only nag when there is nothing.
       if (!saved.length) {
         bannerShow(d.error + "。不影响接收；也可以直接输入对方 IP 发送。");
-        el.innerHTML = '<div class="empty">暂时无法读取节点列表</div>';
+        mount("peers").forEach((n) => { n.innerHTML = '<div class="empty">暂时无法读取节点列表</div>'; });
       }
       peers = [];
     } else {
@@ -387,54 +480,52 @@ async function loadPeers() {
     }
     renderPeers();
   } catch (e) {
-    el.innerHTML = '<div class="empty">读取失败</div>';
+    mount("peers").forEach((n) => { n.innerHTML = '<div class="empty">读取失败</div>'; });
     toast("节点读取失败：" + e, "err");
   } finally {
     peersLoading = false;
-    if (btn) btn.disabled = false;
+    bindAll("peers-refresh", (b) => { b.disabled = false; });
   }
 }
 
 function renderPeers() {
-  const el = $("peers");
   const ready = peers.filter((p) => p.recv === true || (p.recv === undefined && p.online)).length;
-  $("peers-count").textContent = peers.length ? `（${ready}/${peers.length} 可发送）` : "";
-  if (!peers.length) {
-    el.innerHTML = '<div class="empty">tailnet 里没有其他节点</div>';
+  setMount("peers-count", (el) => { el.textContent = peers.length ? `${ready}/${peers.length} 可发送` : ""; });
+  const f = peerFilter.toLowerCase();
+  const visible = f
+    ? peers.filter((p) => (p.name || "").toLowerCase().includes(f) || (p.ip || "").toLowerCase().includes(f))
+    : peers;
+  if (!visible.length) {
+    const msg = peers.length ? "没有匹配的节点" : "tailnet 里没有其他节点";
+    mount("peers").forEach((el) => { el.innerHTML = `<div class="empty">${msg}</div>`; });
     return;
   }
   // LED semantics: green = receiver up (sendable), amber = node online but
-  // its Tailsend isn't running, gray = node offline in tailscale.
+  // its Tailsend isn't running, gray = node offline in tailscale. The hint
+  // text sits right in the row — no tooltip hunting.
   const ledClass = (p) =>
     p.recv === false && p.online ? "idle" : p.online || p.recv === true ? "" : "off";
   const hint = (p) =>
-    p.recv === true ? " · 可发送"
-    : p.recv === false && p.online ? " · 在线，但对方 Tailsend 未在运行"
-    : p.online ? " · 在线" : " · 离线";
-  el.innerHTML = peers.map((p, i) => {
+    p.recv === true ? '<span class="st-ok">可发送</span>'
+    : p.recv === false && p.online ? '<span class="st-idle">未运行</span>'
+    : p.online ? "在线" : "离线";
+  const html = visible.map((p) => {
+    const i = peers.indexOf(p);
     const sel = targets.some((t) => t.key === peerKey(p));
     return `
-    <div class="peer ${ledClass(p)} ${sel ? "sel" : ""} ${p.fresh ? "fresh" : ""}" data-i="${i}" title="${esc(p.fqdn || p.name)}${hint(p)}">
+    <div class="peer ${ledClass(p)} ${sel ? "sel" : ""} ${p.fresh ? "fresh" : ""}" data-i="${i}"
+         title="${esc(p.fqdn || p.name)} · ${esc(p.ip)}">
       <i class="led" aria-hidden="true"></i>
       <span class="meta">
         <span class="name">${p.saved ? '<i class="star" title="收藏的目标">★</i>' : ""}${esc(p.name)}${sel ? '<i class="selmark">已选</i>' : ""}</span>
-        <span class="sub mono">${esc(p.ip)}${p.fqdn && p.fqdn !== p.name ? " · " + esc(p.fqdn) : ""}</span>
+        <span class="sub mono">${esc(p.ip)} · ${hint(p)}</span>
       </span>
       <span class="os">${osIcon(p.os)}</span>
       ${p.saved ? `<button class="fx-del" data-del="${esc(p.ip)}" title="取消收藏">✕</button>` : ""}
     </div>`;
   }).join("");
-  el.querySelectorAll(".peer").forEach((n) => {
-    n.onclick = () => choosePeer(+n.dataset.i);
-  });
-  el.querySelectorAll(".fx-del").forEach((b) => {
-    b.onclick = (e) => {
-      e.stopPropagation();
-      removeTarget(b.dataset.del);
-      loadPeers();
-    };
-  });
-  syncTargetbar();
+  mount("peers").forEach((el) => { el.innerHTML = html; });
+  syncTargetUI();
 }
 
 function choosePeer(i) {
@@ -452,13 +543,13 @@ function choosePeer(i) {
   } else {
     targets = [{ key, label: p.name, addr }]; // 单选 = 整体替换（保留原切换手感）
   }
-  $("manual").value = "";
+  $$(".manual-in").forEach((n) => { n.value = ""; });
   renderPeers();
   updateTargetUI();
 }
 
-function setManualTarget() {
-  const v = $("manual").value.trim();
+function setManualTarget(input) {
+  const v = (input && input.value || "").trim();
   if (!v) { toast("请输入对方的 IP 或主机名", "err"); return; }
   const hit = targets.find((t) => t.addr === v);
   if (multiSel) {
@@ -470,17 +561,18 @@ function setManualTarget() {
     targets = [{ key: "m|" + v, label: v, addr: v }]; // 单选 = 整体替换
   }
   if (!hit) saveTarget(v, v); // 只在真正加入时收藏；取消选择不把收藏复活
+  $$(".manual-in").forEach((n) => { n.value = ""; });
   renderPeers();
   updateTargetUI();
 }
 
-async function saveReceiverToken() {
-  const v = $("rx-token").value.trim();
+async function saveReceiverToken(value) {
+  const v = (value || "").trim();
   try {
     await invoke("set_receiver_token", { token: v });
     try { localStorage.setItem("ts.token.v1", v); } catch { /* ignore */ }
-    $("token-row").hidden = true;
-    $("btn-token").setAttribute("aria-expanded", "false");
+    setMount("token-row", (el) => { el.hidden = true; });
+    bindAll("token", (b) => b.setAttribute("aria-expanded", "false"));
     toast(v ? "接收令牌已启用，接收端已重启" : "接收令牌已清除，接收端已重启", "ok");
     loadStatus();
   } catch (e) {
@@ -492,65 +584,67 @@ const targetNames = () => targets.map((t) => t.label).join("、");
 
 function updateTargetUI() {
   const n = targets.length;
-  $("target-label").textContent = !n ? "未选择目标"
-    : n === 1 ? "→ " + targets[0].label : `→ ${n} 个目标`;
-  const st = $("strip-target");
-  st.textContent = !n ? "选择目标" : n === 1 ? targets[0].label : `${targets[0].label} +${n - 1}`;
-  st.classList.toggle("set", n > 0);
-  const done = $("btn-sheet-done");
-  if (done) done.textContent = n > 1 ? `选好了（${n} 个目标）` : "选好了";
-  syncTargetbar();
+  setMount("target-label", (el) => {
+    el.textContent = !n ? "未选择目标" : n === 1 ? "→ " + targets[0].label : `→ ${n} 个目标`;
+  });
+  setMount("strip-target", (el) => {
+    el.textContent = !n ? "选择目标" : n === 1 ? targets[0].label : `${targets[0].label} +${n - 1}`;
+    el.classList.toggle("set", n > 0);
+  });
+  bindAll("picker-done", (b) => { b.textContent = n > 1 ? `选好了（${n} 个目标）` : "选好了"; });
+  syncTargetUI();
   updateSendBtn();
 }
 
-function updateSendBtn() {
-  $("btn-send").disabled = sending || !targets.length || !items.some((i) => i.status === "ready");
-}
-
-/* ------------------------------------------------- mobile target sheet */
-
-function sheetIsOpen() {
-  return document.body.classList.contains("sheet-open");
-}
-
-function openPeerSheet() {
-  const bar = $("targetbar");
-  const sheet = $("peers-card");
-  if (!bar || !sheet) return;
-  const top = Math.min(bar.getBoundingClientRect().bottom + 8, window.innerHeight - 160);
-  sheet.style.top = top + "px";
-  sheet.style.maxHeight = window.innerHeight - top - 12 + "px";
-  document.body.classList.add("sheet-open");
-  bar.classList.add("open");
-  bar.setAttribute("aria-expanded", "true");
-}
-
-function closePeerSheet() {
-  document.body.classList.remove("sheet-open");
-  const bar = $("targetbar");
-  if (bar) {
-    bar.classList.remove("open");
-    bar.setAttribute("aria-expanded", "false");
-  }
-}
-
-// Target bar mirrors the selection: name/count, dial addr, and the best LED
-// across selected peers (green beats amber beats gray).
-function syncTargetbar() {
-  const bar = $("targetbar");
-  if (!bar) return;
+// The mobile target card mirrors the selection with the best LED across
+// targets (green beats amber beats gray); the desktop targetbar is the
+// label above the link strip.
+function syncTargetUI() {
   const selPeers = peers.filter((p) => targets.some((t) => t.key === peerKey(p)));
-  bar.classList.toggle("has", targets.length > 0);
-  bar.classList.remove("g", "y", "x");
-  bar.classList.add(
-    !targets.length ? "x"
-      : selPeers.some((p) => p.recv === true) ? "g"
-      : selPeers.some((p) => p.online) ? "y" : "x"
-  );
-  $("tb-name").textContent = !targets.length ? "选择发送目标"
-    : targets.length === 1 ? targets[0].label : `${targets.length} 个目标`;
-  $("tb-sub").textContent = !targets.length ? "点这里选节点（可多选），或输入对方 IP"
-    : targets.length === 1 ? targets[0].addr : targetNames();
+  const best = !targets.length ? "x"
+    : selPeers.some((p) => p.recv === true) ? "g"
+    : selPeers.some((p) => p.online) ? "y" : "x";
+  $$(".targetcard").forEach((bar) => {
+    bar.classList.toggle("has", targets.length > 0);
+    bar.classList.remove("g", "y");
+    if (best === "g") bar.classList.add("g");
+    if (best === "y") bar.classList.add("y");
+  });
+  setMount("tc-name", (el) => {
+    el.textContent = !targets.length ? "选择发送目标"
+      : targets.length === 1 ? targets[0].label : `${targets.length} 个目标`;
+  });
+  setMount("tc-sub", (el) => {
+    el.textContent = !targets.length ? "点这里选节点（可多选），或输入对方 IP"
+      : targets.length === 1 ? targets[0].addr : targetNames();
+  });
+}
+
+function updateSendBtn() {
+  const dis = sending || !targets.length || !items.some((i) => i.status === "ready");
+  $$('[data-action="send"]').forEach((b) => { b.disabled = dis; });
+}
+
+/* ---------------------------------------------------------------- picker */
+
+function openPicker() {
+  $("picker").hidden = false;
+  $$(".targetcard").forEach((b) => b.setAttribute("aria-expanded", "true"));
+  loadPeers(); // fresh data the moment the picker opens
+}
+
+function closePicker() {
+  $("picker").hidden = true;
+  $$(".targetcard").forEach((b) => b.setAttribute("aria-expanded", "false"));
+}
+
+/* ---------------------------------------------------------------- tabs */
+
+function setTab(tab) {
+  document.body.dataset.tab = tab;
+  $$('[data-action="tab"]').forEach((b) => {
+    b.setAttribute("aria-pressed", String(b.dataset.tab === tab));
+  });
 }
 
 /* ---------------------------------------------------------------- queue */
@@ -583,7 +677,7 @@ async function addFromPaths(paths) {
 
 function addFromFile(f) {
   if (f.size > DATA_CAP) {
-    toast(`「${f.name}」超过界面发送上限 ${fmtSize(DATA_CAP)}，请在桌面端用「打开文件选择器」`, "err");
+    toast(`「${f.name}」超过界面发送上限 ${fmtSize(DATA_CAP)}，请用「选择文件」走原生通道`, "err");
     return;
   }
   items.push({
@@ -607,8 +701,7 @@ function removeItem(id) {
 }
 
 function renderQueue() {
-  const el = $("queue");
-  el.innerHTML = items.map((i) => {
+  const html = items.map((i) => {
     const k = fileKind(i.rel);
     return `
     <li class="qi ${i.status}" data-id="${i.id}" title="${esc(i.rel)}">
@@ -623,29 +716,18 @@ function renderQueue() {
       ${!sending && i.status !== "sending" ? `<button class="fx" data-x="${i.id}" title="移除">✕</button>` : ""}
     </li>`;
   }).join("");
-  el.querySelectorAll(".fx").forEach((b) => { b.onclick = () => removeItem(+b.dataset.x); });
-  el.querySelectorAll(".fx.retry").forEach((b) => {
-    b.onclick = () => {
-      const it = items.find((x) => x.id === +b.dataset.retry);
-      if (!it) return;
-      it.status = "ready";
-      it.loaded = 0;
-      it.okN = 0;
-      it.tried = 0;
-      it.error = null;
-      renderQueue();
-      updateSendBtn();
-    };
-  });
+  mount("queue").forEach((el) => { el.innerHTML = html; });
 }
 
 function updateRow(item) {
-  const li = $("queue").querySelector(`[data-id="${item.id}"]`);
-  if (!li) return;
-  const fill = li.querySelector(".fbar i");
-  if (fill) fill.style.width = (item.size ? 100 * item.loaded / item.size : 0).toFixed(1) + "%";
-  const size = li.querySelector(".fsize");
-  if (size) size.textContent = fmtSize(item.loaded) + " / " + fmtSize(item.size);
+  mount("queue").forEach((el) => {
+    const li = el.querySelector(`[data-id="${item.id}"]`);
+    if (!li) return;
+    const fill = li.querySelector(".fbar i");
+    if (fill) fill.style.width = (item.size ? 100 * item.loaded / item.size : 0).toFixed(1) + "%";
+    const size = li.querySelector(".fsize");
+    if (size) size.textContent = fmtSize(item.loaded) + " / " + fmtSize(item.size);
+  });
 }
 
 /* ------------------------------------------------------- incoming requests */
@@ -711,14 +793,18 @@ async function answerRequest(accept) {
 
 function updateOverall(doneBytes, totalBytes, t0) {
   const pct = totalBytes ? Math.min(100, (100 * doneBytes) / totalBytes) : 0;
-  $("ofill").style.width = pct.toFixed(1) + "%";
+  setMount("ofill", (el) => { el.style.width = pct.toFixed(1) + "%"; });
   let text = "";
   if (totalBytes) {
     text = `${fmtSize(doneBytes)} / ${fmtSize(totalBytes)}`;
     const secs = (Date.now() - t0) / 1000;
     if (secs > 0.5) text += ` · ${(doneBytes / 1e6 / secs).toFixed(1)} MB/s`;
   }
-  $("otext").textContent = text;
+  setMount("otext", (el) => { el.textContent = text; });
+}
+
+function setSendLabel(text) {
+  $$('[data-action="send"]').forEach((b) => { b.textContent = text; });
 }
 
 function b64(buf) {
@@ -768,7 +854,7 @@ async function send() {
     // One consent round trip per target: the whole batch is confirmed on the
     // receiver together, so a multi-file send pops one dialog, not many.
     // Sends below carry the grant id; old receivers answer "" and proceed.
-    $("btn-send").textContent = `等待 ${pt.t.label} 确认…`;
+    setSendLabel(`等待 ${pt.t.label} 确认…`);
     const entries = ready.map((i) => ({ path: i.path, rel: i.rel, size: i.size }));
     let reqId = "";
     try {
@@ -782,7 +868,7 @@ async function send() {
       toast(`→ ${pt.t.label}：${why}`, "err");
       continue;
     }
-    $("btn-send").textContent = "发送中…";
+    setSendLabel("发送中…");
     for (const item of ready) {
       item.status = "sending";
       item.loaded = 0;
@@ -809,7 +895,7 @@ async function send() {
       // (multi-select is still live), and completion must not depend on it.
       if (item.tried >= perTarget.length) {
         item.status = item.okN === item.tried ? "done" : "error";
-        if (item.status === "error") item.error = "部分目标接收失败，详见上方提示";
+        if (item.status === "error") item.error = "部分目标接收失败，详见提示";
         item.loaded = item.okN ? item.size : 0;
       }
       renderQueue();
@@ -819,7 +905,7 @@ async function send() {
 
   sending = false;
   document.body.classList.remove("sending");
-  $("btn-send").textContent = "发送";
+  setSendLabel("发送");
   renderQueue(); // 恢复各行 ✕（发送期间删除钮整体隐藏）
   updateSendBtn();
   perTarget.forEach((x) => { if (x.ok > 0) saveTarget(x.t.addr, x.t.label); }); // remember where sends succeed
@@ -866,18 +952,23 @@ const inboxKey = (files) =>
 async function loadInbox() {
   try {
     const d = await invoke("inbox_list");
-    $("inbox-count").textContent = d.total ? `（${d.total}）` : "";
+    setMount("inbox-count", (el) => { el.textContent = d.total ? `（${d.total}）` : ""; });
+    setMount("badge-inbox", (el) => {
+      el.hidden = !d.total;
+      el.textContent = d.total > 99 ? "99+" : d.total;
+    });
     const key = inboxKey(d.files);
     if (key === lastInboxKey) return; // 列表没变就别动 DOM，保留悬停/确认态
     lastInboxKey = key;
-    const el = $("inbox");
     if (!d.files.length) {
       knownInbox.clear();
       armedDelete = null;
-      el.innerHTML = '<div class="empty">还没有收到文件——在另一台设备上选择本机作为目标发送即可</div>';
+      mount("inbox").forEach((el) => {
+        el.innerHTML = '<div class="empty">还没有收到文件——在另一台设备上选择本机作为目标发送即可</div>';
+      });
       return;
     }
-    el.innerHTML = d.files.map((f) => {
+    const html = d.files.map((f) => {
       const base = f.path.split("/").pop();
       const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
       const k = fileKind(base);
@@ -893,6 +984,7 @@ async function loadInbox() {
         <span class="imeta"><span class="iname">${esc(base)}</span><span class="isub">${sub}</span></span>${del}
       </li>`;
     }).join("");
+    mount("inbox").forEach((el) => { el.innerHTML = html; });
     d.files.forEach((f) => { if (!f.incoming) knownInbox.add(f.path); });
     if (armedDelete && !d.files.some((f) => f.path === armedDelete)) armedDelete = null;
   } catch (_) { /* receiver dir may not exist yet */ }
@@ -900,111 +992,202 @@ async function loadInbox() {
 
 /* ---------------------------------------------------------------- wiring */
 
-function wire() {
-  $("btn-peers-refresh").onclick = loadPeers;
-  $("btn-multi").onclick = () => {
-    multiSel = !multiSel;
-    $("btn-multi").classList.toggle("on", multiSel);
-    $("btn-multi").setAttribute("aria-pressed", String(multiSel));
-    toast(multiSel ? "多选已开：点节点加入/移出目标" : "多选已关：点节点直接切换目标");
-  };
-  $("btn-manual").onclick = setManualTarget;
-  $("manual").addEventListener("keydown", (e) => { if (e.key === "Enter") setManualTarget(); });
-  $("btn-send").onclick = send;
+// Bind a handler to every instance of a data-action control (both platform
+// skins render their own copy of shared controls). bindAll runs fn(el) once
+// per instance immediately — for state sync; onAll assigns it as onclick.
+function bindAll(action, fn) {
+  $$(`[data-action="${action}"]`).forEach(fn);
+}
+const onAll = (action, fn) => bindAll(action, (el) => { el.onclick = fn; });
 
-  // Mobile: the node panel lives in a sheet dropped from the target bar.
-  $("targetbar").onclick = () => (sheetIsOpen() ? closePeerSheet() : openPeerSheet());
-  $("sheet-backdrop").onclick = closePeerSheet;
-  $("btn-sheet-done").onclick = closePeerSheet;
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && sheetIsOpen()) closePeerSheet(); });
-  window.addEventListener("resize", () => { if (sheetIsOpen()) openPeerSheet(); });
-  $("btn-open").onclick = async () => {
+function wire() {
+  bindAll("peers-refresh", (b) => { b.onclick = loadPeers; });
+  bindAll("multi", (b) => {
+    b.onclick = () => {
+      multiSel = !multiSel;
+      bindAll("multi", (x) => {
+        x.classList.toggle("on", multiSel);
+        x.setAttribute("aria-pressed", String(multiSel));
+      });
+      toast(multiSel ? "多选已开：点节点加入/移出目标" : "多选已关：点节点直接切换目标");
+    };
+  });
+  bindAll("manual-use", (b) => {
+    b.onclick = () => setManualTarget(b.closest(".manual").querySelector(".manual-in"));
+  });
+  $$(".manual-in").forEach((inp) => {
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") setManualTarget(inp); });
+  });
+  bindAll("peer-search", (inp) => {
+    inp.addEventListener("input", () => {
+      peerFilter = inp.value.trim();
+      // keep sibling search boxes in sync
+      $$('[data-action="peer-search"]').forEach((o) => { if (o !== inp && o.value !== inp.value) o.value = inp.value; });
+      renderPeers();
+    });
+  });
+  bindAll("send", (b) => { b.onclick = send; });
+
+  // Mobile target card → full-screen picker.
+  onAll("open-picker", openPicker);
+  onAll("picker-close", closePicker);
+  onAll("picker-done", closePicker);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("picker").hidden) closePicker(); });
+
+  // Tabs.
+  bindAll("tab", (b) => { b.onclick = () => setTab(b.dataset.tab); });
+
+  onAll("open-inbox", async () => {
     try { await invoke("open_inbox"); } catch (e) { toast(String(e), "err"); }
-  };
+  });
   // Receiver token: optional shared secret senders must quote.
   // 确认接收开关（协议 v3）：默认开——收到的传输先确认再落盘。
   const applyConfirm = () => {
     let on = true;
     try { on = localStorage.getItem("ts.confirm.v1") !== "0"; } catch { /* ignore */ }
-    $("btn-confirm").setAttribute("aria-pressed", String(on));
+    bindAll("confirm", (b) => {
+      b.setAttribute("aria-pressed", String(on));
+      b.classList.toggle("on", on && !b.classList.contains("switch"));
+    });
   };
   applyConfirm();
-  $("btn-confirm").onclick = async () => {
-    const on = $("btn-confirm").getAttribute("aria-pressed") !== "true";
-    try {
-      localStorage.setItem("ts.confirm.v1", on ? "1" : "0");
-    } catch { /* ignore */ }
-    $("btn-confirm").setAttribute("aria-pressed", String(on));
-    try { await invoke("set_confirm", { confirm: on }); } catch (e) { toast(String((e && e.message) || e), "err"); }
-    toast(on ? "接收前会先确认每个传输" : "已开启自动接收，不再询问", "ok");
-  };
+  bindAll("confirm", (b) => {
+    b.onclick = async () => {
+      const on = b.getAttribute("aria-pressed") !== "true";
+      try {
+        localStorage.setItem("ts.confirm.v1", on ? "1" : "0");
+      } catch { /* ignore */ }
+      applyConfirm();
+      try { await invoke("set_confirm", { confirm: on }); } catch (e) { toast(String((e && e.message) || e), "err"); }
+      toast(on ? "接收前会先确认每个传输" : "已开启自动接收，不再询问", "ok");
+    };
+  });
+  bindAll("recv-master", (b) => { b.onclick = nodeToggleRecv; });
   $("req-deny").onclick = () => answerRequest(false);
   $("req-accept").onclick = () => answerRequest(true);
 
-  $("btn-token").onclick = () => {
-    const row = $("token-row");
-    row.hidden = !row.hidden;
-    $("btn-token").setAttribute("aria-expanded", String(!row.hidden));
-    if (!row.hidden) $("rx-token").focus();
-  };
-  $("btn-token-save").onclick = saveReceiverToken;
-  $("rx-token").addEventListener("keydown", (e) => { if (e.key === "Enter") saveReceiverToken(); });
-  // 收件箱删除：事件委托挂在列表上（列表 3 秒整体重绘）
-  $("inbox").addEventListener("click", async (e) => {
-    const btn = e.target.closest(".idel");
-    if (!btn) return;
-    const p = btn.dataset.path;
-    if (armedDelete !== p) {
-      armedDelete = p;
-      btn.classList.add("arm");
-      btn.textContent = "确认删除";
-      setTimeout(() => {
-        if (armedDelete === p) {
-          armedDelete = null;
-          btn.classList.remove("arm");
-          btn.textContent = "✕";
-        }
-      }, 2600);
-      return;
-    }
-    armedDelete = null;
-    btn.disabled = true;
-    try {
-      await invoke("inbox_delete", { path: p });
-      toast(`已删除 ${p.split("/").pop()}`);
-    } catch (err) {
-      toast(String(err), "err");
-    }
-    lastInboxKey = "";
-    loadInbox();
+  bindAll("token", (b) => {
+    b.onclick = () => {
+      const rows = mount("token-row");
+      const anyOpen = rows.some((r) => !r.hidden);
+      rows.forEach((r) => { r.hidden = anyOpen; });
+      bindAll("token", (x) => x.setAttribute("aria-expanded", String(!anyOpen)));
+      if (!anyOpen) {
+        const inp = rows.find((r) => !r.hidden && r.offsetParent !== null);
+        (inp && inp.querySelector(".rx-token") || rows[0] && rows[0].querySelector(".rx-token"))?.focus();
+      }
+    };
   });
-  $("btn-pick").onclick = async () => {
+  bindAll("token-save", (b) => {
+    b.onclick = () => saveReceiverToken(b.closest(".token-row").querySelector(".rx-token").value);
+  });
+  $$(".rx-token").forEach((inp) => {
+    inp.addEventListener("keydown", (e) => { if (e.key === "Enter") saveReceiverToken(inp.value); });
+  });
+  // 收件箱删除：事件委托挂在列表上（列表整体重绘）
+  mount("inbox").forEach((el) => {
+    el.addEventListener("click", async (e) => {
+      const btn = e.target.closest(".idel");
+      if (!btn) return;
+      const p = btn.dataset.path;
+      if (armedDelete !== p) {
+        armedDelete = p;
+        mount("inbox").forEach((n) => {
+          n.querySelectorAll(`.idel[data-path="${CSS.escape(p)}"]`).forEach((b) => {
+            b.classList.add("arm");
+            b.textContent = "确认删除";
+          });
+        });
+        setTimeout(() => {
+          if (armedDelete === p) {
+            armedDelete = null;
+            mount("inbox").forEach((n) => {
+              n.querySelectorAll(`.idel[data-path="${CSS.escape(p)}"]`).forEach((b) => {
+                b.classList.remove("arm");
+                b.textContent = "✕";
+              });
+            });
+          }
+        }, 2600);
+        return;
+      }
+      armedDelete = null;
+      btn.disabled = true;
+      try {
+        await invoke("inbox_delete", { path: p });
+        toast(`已删除 ${p.split("/").pop()}`);
+      } catch (err) {
+        toast(String(err), "err");
+      }
+      lastInboxKey = "";
+      loadInbox();
+    });
+  });
+  // 节点行 + 队列行：同样委托（两个平台各有一份挂载点）
+  mount("peers").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      const del = e.target.closest(".fx-del");
+      if (del) {
+        e.stopPropagation();
+        removeTarget(del.dataset.del);
+        loadPeers();
+        return;
+      }
+      const row = e.target.closest(".peer");
+      if (row) choosePeer(+row.dataset.i);
+    });
+  });
+  mount("queue").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      const retry = e.target.closest(".fx.retry");
+      if (retry) {
+        const it = items.find((x) => x.id === +retry.dataset.retry);
+        if (!it) return;
+        it.status = "ready";
+        it.loaded = 0;
+        it.okN = 0;
+        it.tried = 0;
+        it.error = null;
+        renderQueue();
+        updateSendBtn();
+        return;
+      }
+      const x = e.target.closest(".fx");
+      if (x) removeItem(+x.dataset.x);
+    });
+  });
+
+  onAll("pick", async () => {
     try {
       const r = await invoke("pick_files");
       if (r && r.length) await addFromPaths(r);
     } catch (e) { if (!/cancel/i.test(String(e))) toast(String(e), "err"); }
-  };
-  $("btn-pickdir").onclick = async () => {
+  });
+  onAll("pickdir", async () => {
     try {
       const r = await invoke("pick_folders");
       if (r && r.length) await addFromPaths(r);
     } catch (e) { if (!/cancel/i.test(String(e))) toast(String(e), "err"); }
-  };
-  $("btn-inputfile").onclick = () => $("file-in").click();
-  $("file-in").addEventListener("change", (e) => {
-    [...e.target.files].forEach(addFromFile);
-    e.target.value = "";
   });
-  $("dir-in").addEventListener("change", (e) => {
-    [...e.target.files].forEach(addFromFile);
-    e.target.value = "";
+  onAll("inputfile", () => { $$(".file-in").forEach((i) => i.click()); });
+  $$(".file-in").forEach((inp) => {
+    inp.addEventListener("change", (e) => {
+      [...e.target.files].forEach(addFromFile);
+      e.target.value = "";
+    });
+  });
+  $$(".dir-in").forEach((inp) => {
+    inp.addEventListener("change", (e) => {
+      [...e.target.files].forEach(addFromFile);
+      e.target.value = "";
+    });
   });
 
   // Drag & drop is handled by the Tauri webview (desktop only).
-  listen("tauri://drag-enter", () => $("drop").classList.add("over"));
-  listen("tauri://drag-leave", () => $("drop").classList.remove("over"));
+  listen("tauri://drag-enter", () => mount("drop").forEach((d) => d.classList.add("over")));
+  listen("tauri://drag-leave", () => mount("drop").forEach((d) => d.classList.remove("over")));
   listen("tauri://drag-drop", (e) => {
-    $("drop").classList.remove("over");
+    mount("drop").forEach((d) => d.classList.remove("over"));
     const paths = e.payload && e.payload.paths;
     if (paths && paths.length) addFromPaths(paths);
   });
@@ -1032,7 +1215,7 @@ function wire() {
   try {
     const t = localStorage.getItem("ts.token.v1");
     if (t) {
-      $("rx-token").value = t;
+      $$(".rx-token").forEach((inp) => { inp.value = t; });
       invoke("set_receiver_token", { token: t }).catch(() => {});
     }
   } catch { /* ignore */ }
@@ -1043,6 +1226,7 @@ function wire() {
   // Incoming transfer requests (protocol v3) pop the consent dialog.
   listen("incoming-request", (e) => showRequest(e.payload));
 
+  setTab("send");
   loadStatus();
   loadPeers();
   loadInbox();
@@ -1056,4 +1240,16 @@ function wire() {
   window.addEventListener("focus", loadPeers);
 }
 
-wire();
+let peers = [];
+let targets = []; // [{ key, label, addr }] — a send fans out to every entry (1:N)
+let multiSel = false; // multi-select mode: click adds/removes; off: click switches the lone target
+let items = [];
+let itemSeq = 0;
+let sending = false;
+const pendingBatch = new Map(); // batch id -> { item, res, rej }
+const knownInbox = new Set();
+
+(async () => {
+  await detectPlatform();
+  wire();
+})();

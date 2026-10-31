@@ -1,4 +1,5 @@
-/* Tailsend — a quiet instrument panel for moving files across your tailnet. */
+/* Tailsend — 桌面是「节点轨道 + 发送 deck」的双栏仪表；移动是「发送/接收/节点」
+   三 Tab。一套 DOM 两种皮肤：布局由 body[data-platform] 决定。 */
 
 :root {
   --bg: #e8edf4;
@@ -20,6 +21,7 @@
   --shadow-pop: 0 6px 20px rgba(21, 32, 46, 0.16);
   --r-card: 16px;
   --r-ctl: 10px;
+  --tabbar-h: 62px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -48,6 +50,9 @@
 
 html, body { margin: 0; }
 
+/* 元素自身设了 display 时，hidden 属性会被 UA 样式忽略（.guard/.seg 等）——统一压过 */
+[hidden] { display: none !important; }
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -55,7 +60,6 @@ body {
         "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
-  padding-bottom: 32px;
 }
 
 .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
@@ -137,23 +141,29 @@ body {
 
 .seg button { margin-left: 2px; }
 
-/* ---------------------------------------------------------------- layout */
+/* ---------------------------------------------------------------- layout
+   平台切换：一套 DOM，body[data-platform] 决定谁可见。 */
 
-main { padding: 2px 22px 0; max-width: 1160px; margin: 0 auto; }
+main { padding: 2px 22px 0; max-width: 1200px; margin: 0 auto; }
 
-.grid {
-  display: grid;
-  grid-template-columns: 350px minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
+.layout-mobile { display: none; }
+.tabbar { display: none; }
 
-.col {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  min-width: 0;
-}
+body[data-platform="mobile"] .layout-desktop { display: none; }
+body[data-platform="mobile"] .layout-mobile { display: block; }
+body[data-platform="mobile"] .tabbar { display: grid; }
+body[data-platform="mobile"] main { padding: 0 14px calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 16px); }
+
+.view { display: none; }
+body[data-platform="mobile"][data-tab="send"] #view-send,
+body[data-platform="mobile"][data-tab="recv"] #view-recv,
+body[data-platform="mobile"][data-tab="node"] #view-node { display: block; }
+
+/* #view-send 的布局样式用 ID 选择器，会压过 .view 的隐藏——按 tab 显式关掉 */
+#view-send { display: flex; flex-direction: column; gap: 12px; }
+body[data-platform="mobile"]:not([data-tab="send"]) #view-send { display: none; }
+
+/* ---------------------------------------------------------------- cards */
 
 .card {
   background: var(--panel);
@@ -229,28 +239,141 @@ button.ghost {
 
 button.ghost:hover { color: var(--text); border-color: var(--muted); }
 
+button.ghost.on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+button.wide { width: 100%; margin-top: 4px; }
+
 button:focus-visible, input:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
-/* ---------------------------------------------------------------- peers */
+/* 开关（移动端「确认接收」「接收文件」）：同一个 aria-pressed 语义 */
+.switch {
+  flex: none;
+  position: relative;
+  width: 46px;
+  height: 27px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--border);
+  transition: background 0.15s ease;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 21px;
+  height: 21px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transition: left 0.15s ease;
+}
+.switch[aria-pressed="true"] { background: var(--accent); }
+.switch[data-kind="ok"][aria-pressed="true"] { background: var(--ok); }
+.switch[aria-pressed="true"]::after { left: 22px; }
+.switch:disabled { opacity: 0.45; cursor: default; }
+
+/* 搜索框（桌面轨道 + 移动选择器共用） */
+.search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-ctl);
+  background: var(--panel-2);
+}
+.search svg {
+  flex: none;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  padding: 0;
+}
+.search:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+/* ---------------------------------------------------------------- desktop
+   左轨道（节点）无卡片外壳，与右侧 deck 拉开一个层级。 */
+
+.layout-desktop {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.rail {
+  position: sticky;
+  top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 14px 14px 2px;
+  border-right: 1px solid var(--border-soft);
+  max-height: calc(100vh - 90px);
+}
+
+.rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rail-head h2 { margin: 0; font-size: 15px; font-weight: 700; }
+
+.rail-head .count { color: var(--muted); font-weight: 400; }
+
+.rail-btns { display: inline-flex; gap: 6px; }
+
+.deck {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+/* ---------------------------------------------------------------- peers
+   LED 语义直接写在行里，不再藏在 tooltip：绿=可发送，琥珀=在线但对方
+   Tailsend 没运行，灰=离线。 */
 
 .peers {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  max-height: calc(100vh - 318px);
-  min-height: 96px;
   overflow-y: auto;
-  padding-right: 4px;
+  min-height: 96px;
+  padding-right: 2px;
 }
+
+.layout-desktop .peers { flex: 1; }
 
 .peer {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 12px;
+  padding: 9px 11px;
   border-radius: 12px;
   border: 1px solid transparent;
   cursor: pointer;
@@ -283,7 +406,6 @@ button:focus-visible, input:focus-visible {
   box-shadow: none;
 }
 
-/* Amber: node is up in tailscale, but its Tailsend receiver isn't running. */
 .peer.idle .led {
   background: var(--warn);
   box-shadow:
@@ -321,6 +443,9 @@ button:focus-visible, input:focus-visible {
   text-overflow: ellipsis;
 }
 
+.peer .sub .st-ok { color: var(--ok); font-weight: 600; }
+.peer .sub .st-idle { color: var(--warn); }
+
 .peer .os { flex: none; font-size: 16px; }
 
 .peer .star {
@@ -347,8 +472,8 @@ button:focus-visible, input:focus-visible {
 .peer .fx-del:hover { color: var(--err); }
 
 .selfip {
-  margin: 12px 0 0;
-  padding-top: 13px;
+  margin: 2px 0 0;
+  padding-top: 12px;
   border-top: 1px solid var(--border-soft);
   color: var(--muted);
   font-size: 12px;
@@ -357,6 +482,8 @@ button:focus-visible, input:focus-visible {
 .selfip b { color: var(--text); font-weight: 600; }
 
 .selfip[hidden] { display: none; }
+
+.selfip.flat { border-top: none; padding-top: 8px; margin: 0; }
 
 .empty {
   color: var(--muted);
@@ -368,9 +495,6 @@ button:focus-visible, input:focus-visible {
 .manual {
   display: flex;
   gap: 8px;
-  margin-top: 12px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border-soft);
 }
 
 .manual input {
@@ -392,13 +516,13 @@ button:focus-visible, input:focus-visible {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-/* Receiver token (inbox card): same input look as the manual target row. */
+/* Receiver token（桌面收件箱头 + 移动接收页共用一套节点） */
 .token-row {
   display: flex;
   gap: 8px;
-  padding: 12px 20px 0;
+  padding: 12px 0 2px;
 }
-.token-row[hidden] { display: none; } /* display:flex 会压过 hidden 属性的 UA 样式 */
+.token-row[hidden] { display: none; }
 .token-row input {
   flex: 1;
   min-width: 0;
@@ -474,13 +598,13 @@ button:focus-visible, input:focus-visible {
   100% { transform: scale(1); }
 }
 
-.linkstrip .rail {
+.linkstrip .rail-line {
   flex: 1;
   position: relative;
   height: 14px;
 }
 
-.linkstrip .rail::before {
+.linkstrip .rail-line::before {
   content: "";
   position: absolute;
   left: 4px; right: 4px; top: 50%;
@@ -508,13 +632,6 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
   15% { opacity: 1; }
   85% { opacity: 1; }
   to { left: calc(100% - 6px); opacity: 0; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  body.sending .packet { animation: none; left: 50%; opacity: 1; }
-  .linkstrip .node.target.set { animation: none; }
-  .inbox li.new { animation: none; }
-  .peer.fresh { animation: none; }
 }
 
 .drop {
@@ -551,7 +668,7 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
 
 .queue { list-style: none; margin: 12px 0 0; padding: 0; max-height: 250px; overflow-y: auto; }
 
-.queue:empty { display: none; }
+.queue:empty { margin: 0; }
 
 .qi {
   display: flex;
@@ -578,6 +695,7 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
 
 .qi.done .fstate { color: var(--ok); }
 .qi.error .fstate { color: var(--err); }
+.qi.error { background: color-mix(in srgb, var(--err) 6%, transparent); }
 .qi.done .fbar i { background: var(--ok); }
 
 .qi .fx {
@@ -653,7 +771,6 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
 .itic.k-vid { background: #8e5bd6; }
 .itic.k-aud { background: #2f9e9e; }
 .itic.k-zip { background: #d08a2e; }
-.itic.k-pdf { background: #cc5544; }
 .itic.k-doc { background: #3b7bd6; }
 .itic.k-bin { background: color-mix(in srgb, var(--muted) 78%, transparent); }
 
@@ -715,8 +832,13 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
   display: flex;
   flex-direction: column;
   gap: 8px;
-  z-index: 10;
+  z-index: 60;
   max-width: min(440px, calc(100vw - 32px));
+}
+
+body[data-platform="mobile"] .toasts {
+  right: 12px;
+  bottom: calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 12px);
 }
 
 .toast {
@@ -736,174 +858,242 @@ body.sending .packet.p3 { animation-delay: 0.74s; }
   to { opacity: 1; transform: translateY(0); }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .toast { animation: none; }
-  .inbox li.in .itic { animation: none; }
-}
-
 .toast.ok { border-left-color: var(--ok); }
 .toast.err { border-left-color: var(--err); }
 
-/* ------------------------------------------------- target sheet (mobile) */
+/* ================================================================ 移动端 */
 
-/* The node panel becomes a dropdown sheet on phones; the target bar is the
-   handle that drops it. On desktop everything here stays out of the way. */
-.targetbar, .sheet-backdrop, .sheet-done { display: none; }
-
-.head-btns { display: inline-flex; gap: 6px; }
-
-button.ghost.on {
-  color: var(--accent);
-  border-color: var(--accent);
-  background: var(--accent-soft);
+/* 目标卡：发送页第一元素，点开全屏选择器 */
+.targetcard {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  width: 100%;
+  padding: 15px 16px;
+  text-align: left;
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-card);
+}
+.targetcard:active { background: var(--accent-soft); }
+.targetcard .led {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--border);
+}
+.targetcard.g .led {
+  background: var(--ok);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ok) 18%, transparent);
+}
+.targetcard.y .led {
+  background: var(--warn);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 16%, transparent);
+}
+.tc-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tc-name { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.targetcard:not(.has) .tc-name { color: var(--muted); font-weight: 600; }
+.tc-sub { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tc-chev {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  stroke: var(--muted);
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
-/* ---------------------------------------------------------------- mobile */
+/* 节点前置状态的阻断提示（未登录 / 启动中 / 出错），出现在发送页顶部 */
+.guard {
+  border: 1px solid color-mix(in srgb, var(--warn) 50%, transparent);
+  background: color-mix(in srgb, var(--warn) 9%, var(--panel));
+  border-radius: 13px;
+  padding: 12px 14px;
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+.guard.err {
+  border-color: color-mix(in srgb, var(--err) 50%, transparent);
+  background: color-mix(in srgb, var(--err) 8%, var(--panel));
+}
+.guard .g-copy { flex: 1; min-width: 0; }
+.guard b { display: block; }
+.guard .g-sub { color: var(--muted); font-size: 12px; margin-top: 1px; }
 
-@media (max-width: 760px) {
-  .top, main { padding-left: 14px; padding-right: 14px; }
-  .grid { grid-template-columns: 1fr; }
-  .statusbar { width: 100%; flex-wrap: wrap; row-gap: 1px; }
-  .statusbar .sep { display: none; } /* 换行后分隔竖条会悬在行尾，像杂线 */
-  .seg { max-width: 100%; min-width: 0; padding: 4px 8px; }
-  .drop { flex-wrap: wrap; row-gap: 10px; padding: 11px 12px; gap: 10px; }
-  .drop-hint { display: none; }
-  .drop-btns { flex: 1 1 100%; justify-content: flex-start; }
-  .drop-btns button { flex: 1; white-space: nowrap; } /* 等宽三键，对齐 */
-  .inbox .idel { opacity: 1; }
-  .sendbar { flex-wrap: wrap; }
-  .send { flex: 1; }
-  /* 目标已经在 targetbar 里了，动画链路条在手机上纯属重复 */
-  .linkstrip { display: none; }
-  /* Touch targets: keep the delete affordance visible, and keep inputs at
-     16px so iOS Safari doesn't zoom the page on focus. */
-  .peer .fx-del { opacity: 1; }
-  .manual input, .token-row input { font-size: 16px; }
+/* 移动端 drop 三键等宽 */
+body[data-platform="mobile"] .drop { flex-wrap: wrap; row-gap: 10px; padding: 12px; gap: 10px; }
+body[data-platform="mobile"] .drop-hint { display: none; }
+body[data-platform="mobile"] .drop-btns { flex: 1 1 100%; justify-content: flex-start; }
+body[data-platform="mobile"] .drop-btns button { flex: 1; white-space: nowrap; }
+body[data-platform="mobile"] .sendbar { flex-wrap: wrap; }
+body[data-platform="mobile"] .send { flex: 1; }
+body[data-platform="mobile"] .manual input,
+body[data-platform="mobile"] .token-row input,
+body[data-platform="mobile"] .search input { font-size: 16px; }
+body[data-platform="mobile"] .inbox .idel,
+body[data-platform="mobile"] .peer .fx-del { opacity: 1; }
 
-  /* Send and inbox own the page; the node list collapses into a sheet that
-     drops from the target bar — one tap away, not a permanent panel. */
-  .card-head .target { display: none; }
-  .peers-card { display: none; }
+/* 接收页：主开关卡 */
+.recv-ctl { display: flex; flex-direction: column; gap: 4px; }
+.recv-master {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 0 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.rm-copy { flex: 1; min-width: 0; }
+.rm-copy b { font-size: 15px; }
+.rm-meta { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+.rm-meta.on { color: var(--ok); }
+.recv-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--border-soft);
+}
+.rr-label { font-size: 13.5px; font-weight: 600; display: flex; flex-direction: column; gap: 1px; }
+.rr-sub { font-style: normal; font-weight: 400; font-size: 11.5px; color: var(--muted); }
+.recv-ctl .token-row { padding: 12px 0 6px; border-bottom: 1px solid var(--border-soft); }
+.recv-ctl .wide { margin-top: 12px; }
+.recv-hint { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+.recv-hint[hidden] { display: none; }
 
-  .targetbar {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    width: 100%;
-    min-height: 0;
-    margin-bottom: 12px;
-    padding: 10px 14px;
-    text-align: left;
-    background: var(--panel-2);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-  }
-  .targetbar:active { background: var(--accent-soft); }
-  .targetbar.open { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-  .targetbar .led {
-    flex: none;
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--border);
-  }
-  .targetbar.g .led {
-    background: var(--ok);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent);
-  }
-  .targetbar.y .led {
-    background: var(--warn);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 16%, transparent);
-  }
-  .targetbar .tb-meta { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-  .targetbar .tb-name {
-    font-weight: 650;
-    font-size: 14px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .targetbar:not(.has) .tb-name { color: var(--muted); font-weight: 500; }
-  .targetbar .tb-sub {
-    color: var(--muted);
-    font-size: 11px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .targetbar .tb-chev {
-    flex: none;
-    width: 17px;
-    height: 17px;
-    stroke: var(--muted);
-    fill: none;
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-linejoin: round;
-    transition: transform 0.15s ease;
-  }
-  .targetbar.open .tb-chev { transform: rotate(180deg); }
+/* Tab 栏 */
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  grid-template-columns: repeat(3, 1fr);
+  height: calc(var(--tabbar-h) + env(safe-area-inset-bottom));
+  padding: 6px 8px env(safe-area-inset-bottom);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-top: 1px solid var(--border-soft);
+}
+.tabbar button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 0;
+  padding: 4px 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  border-radius: 10px;
+  position: relative;
+}
+.tabbar button svg {
+  width: 21px;
+  height: 21px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.tabbar button[aria-pressed="true"] { color: var(--accent); font-weight: 650; }
+.tabbar .badge {
+  position: absolute;
+  top: 2px;
+  right: calc(50% - 22px);
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  font-style: normal;
+  display: grid;
+  place-items: center;
+}
+.tabbar .badge[hidden] { display: none; }
+.tabbar .ndot {
+  position: absolute;
+  top: 4px;
+  right: calc(50% - 20px);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border);
+}
+.tabbar .ndot.g { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 20%, transparent); }
+.tabbar .ndot.y { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 20%, transparent); }
+.tabbar .ndot.x { background: var(--err); box-shadow: 0 0 0 3px color-mix(in srgb, var(--err) 20%, transparent); }
+.tabbar .ndot.pulse { animation: recvpulse 1.4s ease-in-out infinite; }
 
-  body.sheet-open { overflow: hidden; }
-
-  .sheet-backdrop {
-    position: fixed;
-    inset: 0;
-    z-index: 35;
-    background: color-mix(in srgb, var(--text) 32%, transparent);
-  }
-  body.sheet-open .sheet-backdrop { display: block; animation: fade 0.15s ease; }
-
-  body.sheet-open .peers-card {
-    display: block;
-    position: fixed;
-    left: 12px;
-    right: 12px;
-    z-index: 40;
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    box-shadow: var(--shadow-pop);
-    animation: sheet-in 0.18s ease;
-  }
-
-  .peers { max-height: none; }
-
-  .sheet-done {
-    display: flex;
-    position: sticky;
-    bottom: -18px; /* cancel the card's bottom padding */
-    margin: 14px -20px -18px;
-    padding: 12px 20px calc(12px + env(safe-area-inset-bottom));
-    background: var(--panel);
-    border-top: 1px solid var(--border-soft);
-  }
-  .sheet-done .primary { width: 100%; }
+/* 全屏目标选择器 */
+.picker {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: calc(10px + env(safe-area-inset-top)) 14px calc(12px + env(safe-area-inset-bottom));
+  background: var(--bg);
+  animation: picker-in 0.18s ease;
+}
+.picker[hidden] { display: none; }
+@keyframes picker-in {
+  from { opacity: 0; transform: translateY(14px); }
+}
+.picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.picker-head b { font-size: 16px; }
+.picker-head .slim { padding: 6px 16px; min-height: 0; }
+.picker-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.picker-tools .count { color: var(--muted); font-size: 12px; margin-left: auto; }
+.peers.grow { flex: 1; min-height: 0; }
+.picker-foot {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-@keyframes sheet-in {
-  from { opacity: 0; transform: translateY(-8px); }
-}
+/* 移动端节点页 */
+body[data-platform="mobile"] #view-node .node-card[hidden] { display: none; }
 
-@keyframes fade {
-  from { opacity: 0; }
-}
+.node-card[hidden] { display: none; }
+.node-body { padding: 0; }
+.node-hint { margin: 6px 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.node-hint.err { color: var(--err); }
+.node-meta { margin: 6px 0 10px; font-size: 13px; color: var(--text); }
+.node-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.node-actions .primary { flex: 1; }
 
-@media (prefers-reduced-motion: reduce) {
-  /* Match the compound selectors that set the animations, or they win on
-     specificity (.inbox li.new) / source order (body.sheet-open …). */
-  .peers-card,
-  .sheet-backdrop,
-  body.sheet-open .peers-card,
-  body.sheet-open .sheet-backdrop,
-  .inbox li.new {
-    animation: none;
-  }
-  .targetbar .tb-chev { transition: none; }
-}
+/* ------------------------------------------------- incoming request dialog
+   桌面居中卡片；移动端是底部动作面板。 */
 
-/* --------------------------------------------------- incoming request dialog */
-
-.req-backdrop[hidden] { display: none; } /* 类选择器会压过 [hidden] 的 UA 样式 */
+.req-backdrop[hidden] { display: none; }
 .req-backdrop {
   position: fixed;
   inset: 0;
@@ -986,18 +1176,33 @@ button.ghost.on {
 }
 .req-files .rfs { flex: none; font-size: 12px; color: var(--muted); }
 .req-files .rfmore { font-size: 12.5px; color: var(--muted); }
-.req-btns { display: flex; gap: 10px; justify-content: flex-end; }
-.req-btns .ghost { padding: 8px 14px; }
-.req-btns .primary { padding: 8px 22px; }
+.req-btns { display: flex; gap: 10px; }
+.req-btns .ghost { flex: 1; padding: 10px 14px; }
+.req-btns .primary { flex: 1.4; padding: 10px 22px; }
 
-@media (prefers-reduced-motion: reduce) {
-  .req-card { animation: none; }
+body[data-platform="mobile"] .req-backdrop {
+  place-items: end center;
+  padding: 0;
+}
+body[data-platform="mobile"] .req-card {
+  width: 100%;
+  max-height: 82vh;
+  border-radius: 20px 20px 0 0;
+  border-bottom: none;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  animation: req-sheet 0.2s ease-out;
+}
+@keyframes req-sheet {
+  from { transform: translateY(40px); opacity: 0; }
 }
 
-/* embedded node card (mobile) */
-.node-card[hidden] { display: none; }
-.node-body { padding: 0 16px 14px; }
-.node-hint { margin: 6px 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
-.node-hint.err { color: var(--err); }
-.node-meta { margin: 6px 0 10px; font-size: 13px; color: var(--text); }
-.node-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+/* ------------------------------------------------- motion preferences */
+
+@media (prefers-reduced-motion: reduce) {
+  body.sending .packet { animation: none; left: 50%; opacity: 1; }
+  .linkstrip .node.target.set { animation: none; }
+  .inbox li.new, .inbox li.in .itic, .peer.fresh { animation: none; }
+  .toast, .req-card, .picker { animation: none; }
+  .tabbar .ndot.pulse { animation: none; }
+  .switch::after { transition: none; }
+}
