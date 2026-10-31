@@ -6,7 +6,7 @@ import (
 	"os"
 )
 
-const version = "0.1.3"
+const version = "0.2.0"
 
 // defaultPort is arbitrary but registered nowhere; both sides must agree.
 const defaultPort = 4782
