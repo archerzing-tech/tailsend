@@ -43,6 +43,10 @@ func main() {
 	s := &tsnet.Server{
 		Hostname: *hostname,
 		Dir:      *dir,
+		// tsnet swallows its internal net/disco/derp logs into logtail unless
+		// Logf is set — without this a dial failure is completely opaque.
+		Logf:     log.Printf,
+		UserLogf: log.Printf,
 	}
 	ctx := context.Background()
 
@@ -82,10 +86,20 @@ func main() {
 	fmt.Printf("SPIKE serving on http://%s:%d (tailnet side)\n", ip4, *port)
 
 	// ---- outbound: dial a real receiver through the netstack ----
+	// A fresh node may need several seconds to hole-punch or fall back to a
+	// relay, so allow generous attempts before declaring the path dead.
 	if *peer != "" {
-		pctx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		defer cancel()
-		conn, err := s.Dial(pctx, "tcp", *peer)
+		var conn net.Conn
+		var err error
+		for attempt := 1; attempt <= 3 && conn == nil; attempt++ {
+			pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			fmt.Printf("SPIKE outbound attempt %d -> %s\n", attempt, *peer)
+			conn, err = s.Dial(pctx, "tcp", *peer)
+			cancel()
+			if err != nil && attempt < 3 {
+				time.Sleep(2 * time.Second)
+			}
+		}
 		if err != nil {
 			fmt.Printf("SPIKE outbound dial %s FAILED: %v\n", *peer, err)
 		} else {

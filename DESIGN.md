@@ -65,6 +65,10 @@ Tailsend 只做两件事：**发送**和**接收**。所有设计围绕这两件
 - 登录：AuthKey（headless）或 `AwaitStartupURL`（GUI 弹 webview 让用户浏览器授权）。
 - root `main.go` 不 import tsnet，CLI 二进制不变胖；tsnet 只进 `mobile/` 包。
 - 阶段：P0 在 Mac 上跑通 tsnet 节点收发（尖刺）→ P1 AAR → P2 Kotlin 服务 + Tauri 桥 → P3 UI。
+- **P0 尖刺结论（2026-10-31，`cmd/tsnet-spike`）**：登录（浏览器授权、状态持久 `~/.tailsend/tsnet-spike`）、入站（`s.Listen` 供 tailnet 访问）、出站（`s.Dial` → 对端 receiver HTTP 往返成功）三项全通。
+  - **出站冷启动需预热**：全新会话首轮 dial 常在 ~30s 内超时（disco/DERP 路径未热）；对端有任一流量（如 TSMP ping）或重试一轮后即通。产品实现必须带重试与宽松超时（尖刺用 3×30s）。
+  - **同 NAT 环境无直连**：本机 ISP 为 CGNAT（en0 即 100.x/23），两节点 hairpin 打洞不成，走 DERP 中继（sfo，RTT ~350ms）。文件传输出中继可用但慢，属可接受 MVP 底线。
+  - **调试必须设 `Logf`**：tsnet 默认把内部 disco/derp/netcheck 日志吞进 logtail，不设 `Logf` 则拨号失败完全无迹可查。
 
 ## 4. 路线
 
@@ -72,5 +76,5 @@ Tailsend 只做两件事：**发送**和**接收**。所有设计围绕这两件
 |---|---|---|
 | P1 | 协议 v3 双端（Go + Rust）+ 测试 | ✅ Go 3c6cd56 / Rust 5fb4020，互操作矩阵 6 场景全过 |
 | P2 | GUI：确认弹窗、等待确认态、确认开关（发送/接收两区待后续迭代） | ✅ 弹窗/开关/等待态已落地 |
-| P3 | tsnet all-in-one（mobile 包 → AAR → Kotlin → 桥 → UI） | ⏳ |
+| P3 | tsnet all-in-one（mobile 包 → AAR → Kotlin → 桥 → UI） | ⏳ Phase-0 尖刺 ✅ 2026-10-31（登录/入站/出站三项全通） |
 | P4 | v0.2.0 发布（版本号 6 处 + release notes） | ⏳ |
