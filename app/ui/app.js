@@ -134,6 +134,13 @@ async function pollNode() {
   nodeStatus = st || null;
   nodeRunning = !!st && st.state === "running";
   syncNodeUI();
+  // 手机上节点跟着 app 进程走：进程被杀后重启，node 归零，UI 只能干等用户
+  // 点「启动」。开机自己 ensure 一次——创建即自启（登录态在 filesDir，是
+  // 持久的），LocalSend 式的「打开就能用」。
+  if (platform === "mobile" && (!st || st.state === "off") && !autoNodeTried) {
+    autoNodeTried = true;
+    invoke("node_ensure").then(pollNode).catch(() => {});
+  }
   // LocalSend 逻辑：节点在跑，接收就默认是开的，不让人记得去开开关。
   // 用户用开关显式关过（ts.recv.useroff）则尊重，不再自动拉起。
   if (platform === "mobile" && st && st.state === "running" && st.receiver !== "on"
@@ -888,6 +895,7 @@ let reqQueue = [];
 let reqCur = null; // { id }
 let reqTimer = null;
 let autoRecvTried = false; // one auto-start attempt per node-running stretch
+let autoNodeTried = false; // one node-ensure attempt per app launch (mobile)
 
 function showRequest(p) {
   reqQueue.push(p);

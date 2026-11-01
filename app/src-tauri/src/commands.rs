@@ -89,12 +89,22 @@ pub async fn tailscale_start_service() -> Result<(), String> {
         // `Get-Service Tailscale*` spares us guessing the exact service name.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let script = "Start-Process powershell -Verb runAs -Wait -ArgumentList '-NoProfile','-Command','Get-Service Tailscale* | Start-Service'";
-        let out = tokio::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", script])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output()
-            .await
-            .map_err(|e| format!("无法调用 PowerShell：{e}"))?;
+        // A stuck Start-Service would hold this command open forever and the
+        // fix button with it; bound the whole thing (kill_on_drop reaps the
+        // child when the timeout cancels the future).
+        let out = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            tokio::process::Command::new("powershell")
+                .args(["-NoProfile", "-Command", script])
+                .creation_flags(CREATE_NO_WINDOW)
+                .kill_on_drop(true)
+                .output()
+                .await
+        })
+        .await;
+        let out = match out {
+            Ok(r) => r.map_err(|e| format!("无法调用 PowerShell：{e}"))?,
+            Err(_) => return Err("启动服务超时：请手动打开 Tailscale 客户端试试".into()),
+        };
         if out.status.success() {
             Ok(())
         } else {

@@ -116,6 +116,10 @@ pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
 pub async fn status_detailed() -> Result<(SelfInfo, Vec<Peer>), DiscoveredErr> {
     let mut cmd = tokio::process::Command::new(cli_bin());
     cmd.args(["status", "--json"]);
+    // The UI polls this every 15s — a wedged backend (sleep/wake, hung
+    // tailscaled pipe) must not leave the poll awaiting forever, or the
+    // device list freezes with no error at all. Bound it and kill the child.
+    cmd.kill_on_drop(true);
     #[cfg(target_os = "windows")]
     {
         // The CLI is a console program and the UI polls this constantly —
@@ -123,9 +127,12 @@ pub async fn status_detailed() -> Result<(SelfInfo, Vec<Peer>), DiscoveredErr> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd
-        .output()
+    let out = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output())
         .await
+        .map_err(|_| DiscoveredErr {
+            state: "daemon_down".into(),
+            message: "Tailscale 服务没有响应（8 秒超时）：重启一下 Tailscale 客户端试试".to_string(),
+        })?
         .map_err(|_| DiscoveredErr {
             state: "cli_missing".into(),
             message: "没有找到 Tailscale 命令行（CLI）：请确认已安装并至少打开过一次 Tailscale 客户端"
