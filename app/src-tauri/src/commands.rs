@@ -498,10 +498,18 @@ pub async fn send_data_end(
             drop(file);
             let token = app.state::<AppState>().recv.lock().unwrap().token.clone();
             let node = app.state::<NodeState>();
+            // Kotlin reads paths back with getString() — a JSON *string*
+            // holding the array — so pre-encode; a structured array arrives
+            // as a JSArray there and reads back empty.
             let r = node
                 .call(
                     "send_files",
-                    json!({ "target": target, "paths": [path.to_string_lossy()], "token": token }),
+                    json!({
+                        "target": target,
+                        "paths": serde_json::to_string(&[path.to_string_lossy()])
+                            .unwrap_or_else(|_| "[]".into()),
+                        "token": token,
+                    }),
                 )
                 .await?;
             let _ = std::fs::remove_file(&path);
@@ -545,6 +553,20 @@ async fn node_stage_begin(
         .map_err(|e| e.to_string())?
         .join("send-tmp");
     std::fs::create_dir_all(&dir).map_err(|e| format!("临时目录创建失败：{e}"))?;
+    // Sweep stage files from crashed sends before making room.
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let stale = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| t < cutoff)
+                .unwrap_or(false);
+            if stale {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
     let base = name.rsplit('/').next().unwrap_or("file");
     let base = base.rsplit('\\').next().unwrap_or(base);
     let safe: String = base.trim().trim_matches('.').replace(['/', '\\', ':', '\u{0}'], "_");
@@ -598,7 +620,33 @@ fn strip_temp_suffix(rel: &str) -> Option<String> {
 pub async fn inbox_list(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
 ) -> Result<serde_json::Value, String> {
+    // The embedded node's receiver has its own in-flight uploads (that's the
+    // receiver phone transfers actually hit); merge its progress into the
+    // same temp-name→(got,total) feed so the inbox gets determinate bars.
+    #[cfg(target_os = "android")]
+    let go_prog: std::collections::HashMap<String, (u64, u64)> = match node
+        .call("inbox_progress", json!({}))
+        .await
+    {
+        Ok(v) => v
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, arr)| {
+                        let a = arr.as_array()?;
+                        Some((k.clone(), (a.first()?.as_u64()?, a.get(1)?.as_u64()?)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        Err(_) => Default::default(),
+    };
+    #[cfg(not(target_os = "android"))]
+    let go_prog: std::collections::HashMap<String, (u64, u64)> = Default::default();
+    #[cfg(not(target_os = "android"))]
+    let _ = &node; // desktop: the embedded node has no receiver here
     let dir = state.recv.lock().unwrap().save_dir.clone();
     let uploads = state.uploads.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -606,7 +654,8 @@ pub async fn inbox_list(
         // the async runtime. Called on a worker thread it panics while holding
         // the registry lock, poisoning it: every later receiver access
         // (begin/chunk/complete/janitor) panics too and ALL transfers die.
-        let prog = netcore::upload_progress(&uploads);
+        let mut prog = netcore::upload_progress(&uploads);
+        prog.extend(go_prog);
         let mut out: Vec<InboxEntry> = vec![];
         // (rel path, size, mtime, incoming) — in-flight temps collapse onto the
         // final name so a receiving file shows up once, growing live.
@@ -894,13 +943,18 @@ pub async fn node_send_files(
     if paths.is_empty() {
         return Err("没有可发送的文件".into());
     }
-    let app_state = app.state::<AppState>();
-    let token = app_state.recv.lock().unwrap().token.clone();
-    drop(app_state);
+    let token = app.state::<AppState>().recv.lock().unwrap().token.clone();
+    // Kotlin reads paths back with getString() — a JSON *string* holding the
+    // array — so hand it over pre-encoded instead of as a structured array.
     state
         .call(
             "send_files",
-            json!({ "target": target, "paths": paths, "token": token }),
+            json!({
+                "target": target,
+                "paths": serde_json::to_string(&paths).unwrap_or_else(|_| "[]".into()),
+                "token": token,
+                "sender": netcore::host_name(),
+            }),
         )
         .await
 }

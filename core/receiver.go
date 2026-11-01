@@ -84,6 +84,32 @@ func (rcv *Receiver) store() *uploadStore {
 	return rcv.up
 }
 
+// Inflight snapshots the in-flight v2 uploads as JSON
+// {"<spool basename>": [bytesReceived, declaredTotal], …} — the same shape
+// the Rust receiver's progress feed uses, so the GUI renders determinate
+// progress bars for uploads this receiver is still writing.
+func (rcv *Receiver) Inflight() string {
+	up := rcv.store()
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	m := make(map[string][]int64, len(up.uploads))
+	for _, c := range up.uploads {
+		base := filepath.Base(c.tmpPath)
+		c.mu.Lock()
+		got := int64(len(c.received)) * c.chunk
+		if got > c.size {
+			got = c.size
+		}
+		c.mu.Unlock()
+		m[base] = []int64{got, c.size}
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
 // Handler returns the receiver's HTTP routes.
 func (rcv *Receiver) Handler() http.Handler {
 	up := rcv.store()

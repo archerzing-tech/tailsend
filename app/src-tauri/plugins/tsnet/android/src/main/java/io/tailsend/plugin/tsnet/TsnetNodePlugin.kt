@@ -200,6 +200,20 @@ class TsnetNodePlugin(private val activity: Activity) : Plugin(activity) {
     }
   }
 
+  // In-flight uploads the embedded receiver is still writing, as JSON
+  // {"<spool basename>": [bytesReceived, declaredTotal], …}. The inbox
+  // merges this with the Rust receiver's progress so phone receives get
+  // real progress bars; "{}" when nothing is in flight.
+  @Command
+  fun inbox_progress(invoke: Invoke) {
+    val n = nodeOrReject(invoke) ?: return
+    try {
+      invoke.resolve(JSObject.fromJSONObject(org.json.JSONObject(n.inboxProgress())))
+    } catch (e: Exception) {
+      invoke.reject(e.message ?: "inbox_progress failed")
+    }
+  }
+
   // Hand a received file to the system viewer: FileProvider content:// URI +
   // ACTION_VIEW, granted one-time read. The provider covers the whole
   // filesDir (see res/xml/file_paths.xml), where the inbox lives.

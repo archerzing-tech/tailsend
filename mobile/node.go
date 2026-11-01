@@ -55,6 +55,16 @@ type Node struct {
 	tailnet      string
 	lastErr      string
 	debugLog     []string // ring buffer of recent tsnet log lines (diagnosis)
+	sending      *sendSnap // non-nil while SendFiles is moving bytes
+}
+
+// sendSnap is one file's live upload progress, surfaced through Status so
+// the GUI can animate the send bar on phones (where sends run inside the
+// Go engine, invisible to the Rust event feed).
+type sendSnap struct {
+	Rel   string `json:"rel"`
+	Got   int64  `json:"got"`
+	Total int64  `json:"total"`
 }
 
 // debugKeep bounds the log ring surfaced through Status; tsnet's internal
@@ -200,20 +210,47 @@ func (n *Node) Peers() string {
 	return string(b)
 }
 
+// InboxProgress reports this node's receiver's in-flight uploads as JSON
+// {"<spool basename>": [bytesReceived, declaredTotal], …} — the same shape
+// the Rust receiver's progress feed uses, so the inbox renders determinate
+// bars. Always "{}" when the receiver is off; never fails.
+func (n *Node) InboxProgress() string {
+	n.mu.Lock()
+	rcv := n.rcv
+	n.mu.Unlock()
+	if rcv == nil {
+		return "{}"
+	}
+	return rcv.Inflight()
+}
+
+// setSend updates the live send-progress snapshot Status exposes; done<0
+// ends it. Called from UploadFile's progress callback on sender goroutines.
+func (n *Node) setSend(rel string, done, total int64) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if done < 0 {
+		n.sending = nil
+		return
+	}
+	n.sending = &sendSnap{Rel: rel, Got: done, Total: total}
+}
+
 // Status returns a JSON snapshot for UI polling:
-// {state, login_url, ip, hostname, tailnet, error, receiver}
+// {state, login_url, ip, hostname, tailnet, error, receiver, sending}
 func (n *Node) Status() string {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	st := struct {
-		State    string `json:"state"`
-		LoginURL string `json:"login_url,omitempty"`
-		IP       string `json:"ip,omitempty"`
-		Hostname string `json:"hostname"`
-		Tailnet  string `json:"tailnet,omitempty"`
-		Error    string `json:"error,omitempty"`
-		Receiver string `json:"receiver,omitempty"` // "on" once StartReceiver succeeds
-		DebugLog string `json:"debug_log,omitempty"`
+		State    string    `json:"state"`
+		LoginURL string    `json:"login_url,omitempty"`
+		IP       string    `json:"ip,omitempty"`
+		Hostname string    `json:"hostname"`
+		Tailnet  string    `json:"tailnet,omitempty"`
+		Error    string    `json:"error,omitempty"`
+		Receiver string    `json:"receiver,omitempty"` // "on" once StartReceiver succeeds
+		DebugLog string    `json:"debug_log,omitempty"`
+		Sending  *sendSnap `json:"sending,omitempty"`
 	}{
 		State:    n.state,
 		LoginURL: n.loginURL,
@@ -413,8 +450,12 @@ func (n *Node) SendFiles(addr, token, sender, filesJSON string) string {
 		b, _ := json.Marshal(map[string]any{"error": err.Error()})
 		return string(b)
 	}
+	defer n.setSend("", -1, 0) // the snapshot dies with the batch, however it ends
 	for _, f := range list {
-		err := core.UploadFile(addr, token, sender, reqID, f, nil)
+		n.setSend(f.Rel, 0, f.Size)
+		err := core.UploadFile(addr, token, sender, reqID, f, func(done, total int64) {
+			n.setSend(f.Rel, done, total)
+		})
 		r := struct {
 			Name  string `json:"name"`
 			OK    bool   `json:"ok"`
