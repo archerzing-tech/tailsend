@@ -454,7 +454,9 @@ async function loadPeers() {
           setMount("self-name", (el) => { el.textContent = selfName; });
         }
       }
-      peers = d.peers || [];
+      // Belt and braces: some tailscale builds list self inside Peer too —
+      // the source filters it, but stale answers shouldn't resurrect it.
+      peers = (d.peers || []).filter((p) => !selfIp || p.ip !== selfIp);
     }
     peers.forEach((p) => { p.recv = undefined; }); // receiver probe pending
     // Merge saved targets, probing the ones discovery can't see (mobile).

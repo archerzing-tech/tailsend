@@ -189,6 +189,11 @@ func (n *Node) Peers() string {
 		if len(p.TailscaleIPs) > 0 {
 			d.IP = p.TailscaleIPs[0].String()
 		}
+		// Some tailscale builds keep this node inside Peer as well — sending
+		// to yourself is not a thing; drop the self entry.
+		if out.Self != nil && d.IP != "" && d.IP == out.Self.IP {
+			continue
+		}
 		out.Peers = append(out.Peers, d)
 	}
 	b, _ := json.Marshal(out)
