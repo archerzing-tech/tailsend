@@ -229,41 +229,6 @@ h2 {
 .brand .name { font-weight: 700; font-size: 15px; letter-spacing: .01em; }
 .brand .ver { color: var(--mut); font-size: 11.5px; margin-left: 2px; }
 
-.statusbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.seg {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 340px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--mut);
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 3px 10px;
-}
-.seg b { color: var(--ink); font-weight: 600; }
-.seg .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--mut);
-  flex: none;
-}
-.seg.ok .dot { background: var(--green); }
-.seg.ok { color: var(--ink); }
-.seg.warn .dot { background: var(--amber-dot); }
-.seg.warn { color: var(--amber); }
-.seg .ghost { padding: 1px 8px; font-size: 12px; height: auto; }
-
 /* ------------------------------------------------------------ layout */
 
 body {
@@ -499,6 +464,8 @@ body[data-platform="desktop"][data-tab="send"] .sendbar { margin-top: 0; }
 body[data-platform="mobile"] .drop { flex-wrap: wrap; }
 body[data-platform="mobile"] .drop-btns { flex: 1 0 100%; padding-top: 12px; }
 body[data-platform="mobile"] .drop-btns .primary { flex: 1; }
+/* 手机只有一个入口：选择文件（原生选择器失败会自动退到 webview 选择器） */
+body[data-platform="mobile"] .drop-btns .ghost { display: none; }
 
 /* 桌面有拖放 + 原生选择，「界面选择」只留给移动端 */
 body[data-platform="desktop"] [data-action="inputfile"] { display: none; }
@@ -735,7 +702,6 @@ body[data-platform="mobile"] .devs {
 }
 .b-ok { background: var(--green-bg); color: var(--green); }
 .b-idle { background: var(--amber-bg); color: var(--amber); }
-.b-on { background: var(--sky); color: var(--blue-ink); }
 .b-lan { background: var(--sky); color: var(--blue); }
 .b-dim { background: var(--paper-2); color: var(--mut); }
 .dsub {
@@ -936,75 +902,16 @@ body[data-platform="mobile"] .send { height: 44px; }
 
 /* ------------------------------------------------------------ 接收页 */
 
-.hero {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: var(--r-card);
-  padding: 14px 16px;
-  margin-bottom: var(--gap);
+/* LocalSend 式的极简：状态就是一行安静的字，收件列表才是主角。 */
+.recv-status {
+  padding: 2px 4px 10px;
+  color: var(--mut);
+  font-size: 13px;
 }
-
-.radar {
-  position: relative;
-  width: 76px;
-  height: 76px;
-  flex: none;
-  display: grid;
-  place-items: center;
-}
-.radar i {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 1.5px solid var(--line-2);
-}
-.radar-mark {
-  width: 44px;
-  height: 44px;
-  box-sizing: border-box;
-  padding: 7px;
-  fill: none;
-  stroke: var(--mut);
-  stroke-width: 1.7;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-  background: var(--paper-2);
-  border-radius: 50%;
-}
-
-.hero.on .radar i {
-  border-color: color-mix(in srgb, var(--green) 55%, transparent);
-  animation: ping 2.8s ease-out infinite;
-}
-.hero.on .radar i:nth-child(2) { animation-delay: .9s; }
-.hero.on .radar i:nth-child(3) { animation-delay: 1.8s; }
-@keyframes ping {
-  0% { transform: scale(.32); opacity: 0; }
-  12% { opacity: 1; }
-  100% { transform: scale(1.15); opacity: 0; }
-}
-.hero.on .radar-mark { stroke: var(--green); background: var(--green-bg); }
-.hero.warn .radar-mark { stroke: var(--amber); background: var(--amber-bg); }
-
-.hero-copy { flex: 1; min-width: 0; }
-.h-state { margin: 0; font-size: 15px; font-weight: 600; }
-.h-dir { margin: 2px 0 0; color: var(--mut); font-size: 12.5px; }
-.hero-actions { display: flex; align-items: center; gap: 8px; flex: none; }
-/* 桌面接收走系统核心，主开关只属于移动端内置节点 */
-body[data-platform="desktop"] .hero-actions .switch { display: none; }
-
-/* 移动端 hero 竖排居中，像 LocalSend 的主页身份区 */
-body[data-platform="mobile"] .hero {
-  flex-direction: column;
-  text-align: center;
-  gap: 12px;
-  padding: 24px 16px 20px;
-}
-body[data-platform="mobile"] .radar { width: 78px; height: 78px; }
-body[data-platform="mobile"] .radar-mark { width: 46px; height: 46px; padding: 8px; }
+.recv-status p { margin: 0; }
+.recv-status .sub { margin-top: 2px; font-size: 12.5px; }
+.recv-status.on p:first-child { color: var(--green); }
+.recv-status.warn p:first-child { color: var(--amber); }
 
 /* ------------------------------------------------------------ 收件列表 */
 

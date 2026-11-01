@@ -85,36 +85,11 @@ async function loadStatus() {
     $("ver").textContent = "v" + s.version;
     setMount("self-ver", (el) => { el.textContent = "Tailsend v" + s.version; });
     const r = s.receiver;
-    const chip = $("chip-recv");
-    if (r.listening) {
-      chip.className = "seg ok";
-      // Receiver binds every interface now — show where it's actually
-      // reachable instead of the raw 0.0.0.0 bind address.
-      const port = (r.addr || "").split(":").pop() || "";
-      let ips = Array.isArray(r.advertise) ? r.advertise.filter(Boolean) : [];
-      if (!ips.length) ips = ["0.0.0.0"];
-      const label = ips
-        .map((ip) => (ip === "0.0.0.0" ? "本网络" : ip) + ":" + port)
-        .join(" / ");
-      chip.innerHTML = '<i class="dot"></i>接收中 <b class="mono">' + esc(label) + "</b>";
-    } else {
-      chip.className = "seg warn";
-      chip.innerHTML = '<i class="dot"></i>接收端未运行';
-      const b = document.createElement("button");
-      b.className = "ghost";
-      b.textContent = "重试";
-      b.onclick = retryReceiver;
-      chip.appendChild(b);
-    }
     recvSaveDir = r.save_dir || "";
     setMount("recv-hint", (el) => {
       el.hidden = !recvSaveDir;
       el.textContent = "文件保存在 " + recvSaveDir;
     });
-    const dir = $("chip-dir");
-    dir.hidden = false;
-    dir.title = r.save_dir;
-    dir.textContent = "保存到 " + r.save_dir;
     desktopListening = !!r.listening;
     recvAddrs.lan = ((r.advertise || []).find((ip) => ip && !ip.startsWith("100."))) || "";
     syncHero();
@@ -122,16 +97,6 @@ async function loadStatus() {
   } catch (e) {
     toast("状态获取失败：" + e, "err");
   }
-}
-
-async function retryReceiver() {
-  try {
-    await invoke("restart_receiver");
-    toast("接收端已启动", "ok");
-  } catch (e) {
-    toast("接收端仍无法启动：" + e, "err");
-  }
-  loadStatus();
 }
 
 let bannerShownFor = "";
@@ -222,17 +187,16 @@ async function nodeToggleRecv() {
   pollNode();
 }
 
-// 接收页 hero 的三态：on=雷达呼吸（真的能收），warn=琥珀（要人管），off=静默
+// 接收页的状态：LocalSend 式的一行安静文字，不占版面、不做动画。
+// on=接收中（说清哪条路），warn=有一说一（局域网能收就说能收）。
 function syncHero() {
-  const hero = document.querySelector(".hero");
-  if (!hero) return;
   let mode = "warn";
   let text = "";
   if (platform === "mobile") {
     const st = nodeStatus;
     const state = st ? st.state || "off" : "off";
-    // LocalSend 逻辑：接收不是一个要人管理的状态。两条通道任一活着就是
-    // 「接收中」——局域网接收器常驻（Rust 侧），tailnet 接收看内置节点。
+    // 接收能力 = 两条通道任一活着就算「接收中」：局域网接收器常驻
+    // （Rust 侧），tailnet 接收看内置节点。
     const lan = desktopListening === true;
     const tsOn = state === "running" && st.receiver === "on";
     if (lan || tsOn) {
@@ -241,17 +205,19 @@ function syncHero() {
       if (lan) parts.push("局域网" + (recvAddrs.lan ? " " + recvAddrs.lan + ":4782" : ""));
       if (tsOn) parts.push("Tailscale " + (st.ip || "") + ":4782");
       text = "接收中 · " + parts.join(" · ");
-    } else if (state === "starting") { mode = "warn"; text = "节点启动中…"; }
-    else if (state === "needs_login") { mode = "warn"; text = "同一 Wi-Fi 可收 · 跨网接收需登录（「本机」页）"; }
-    else if (state === "error") { mode = "warn"; text = "节点出错 · 局域网仍可收；跨网在「本机」页重试"; }
-    else { mode = "warn"; text = "同一 Wi-Fi 可收 · 跨网接收需启动节点（「本机」页）"; }
+    } else if (state === "starting") { text = "节点启动中…"; }
+    else if (state === "needs_login") { text = "同一 Wi-Fi 可收 · 跨网接收需登录（「本机」页）"; }
+    else if (state === "error") { text = "节点出错 · 局域网仍可收；跨网在「本机」页重试"; }
+    else { text = "同一 Wi-Fi 可收 · 跨网接收需启动节点（「本机」页）"; }
   } else {
-    if (desktopListening === null) { mode = "warn"; text = "检测中…"; }
+    if (desktopListening === null) { text = "检测中…"; }
     else if (desktopListening) { mode = "on"; text = "接收中 · 等待对方发送"; }
-    else { mode = "warn"; text = "接收端未运行"; }
+    else { text = "接收端未启动 · 会在几十秒内自动重试"; }
   }
-  hero.classList.toggle("on", mode === "on");
-  hero.classList.toggle("warn", mode === "warn");
+  mount("recv-status").forEach((el) => {
+    el.classList.toggle("on", mode === "on");
+    el.classList.toggle("warn", mode === "warn");
+  });
   setMount("recv-meta", (el) => { el.textContent = text; });
 }
 
@@ -298,12 +264,6 @@ function syncNodeUI() {
     el.querySelectorAll("[data-guard]").forEach((b) => {
       b.onclick = b.dataset.guard === "login" ? nodeLogin : nodeEnsure;
     });
-  });
-
-  bindAll("recv-master", (el) => {
-    const on = !!st && state === "running" && st.receiver === "on";
-    el.setAttribute("aria-pressed", String(on));
-    el.disabled = !st || (state !== "running");
   });
 
   setMount("node-state", (el) => { el.textContent = st ? (nodeVerbs[state] || state) : ""; });
@@ -467,7 +427,6 @@ async function discoverViaPeers() {
 async function loadPeers() {
   if (peersLoading) return;
   peersLoading = true;
-  bindAll("peers-refresh", (b) => { b.disabled = true; });
   try {
     // LAN direct channel: sweep the local subnets in parallel with tailnet
     // discovery (~1s) so the same Wi-Fi works with Tailscale down.
@@ -504,8 +463,6 @@ async function loadPeers() {
     } else {
       bannerHide();
       if (d.self && d.self.name) {
-        $("chip-self").innerHTML = "本机：<b>" + esc(d.self.name) + "</b>" +
-          (d.self.ip ? ' <span class="mono">' + esc(d.self.ip) + "</span>" : "");
         if (d.self.ip) rememberSelfIp(d.self.ip);
         if (selfName !== d.self.name) {
           selfName = d.self.name;
@@ -595,7 +552,6 @@ async function loadPeers() {
     toast("设备读取失败：" + e, "err");
   } finally {
     peersLoading = false;
-    bindAll("peers-refresh", (b) => { b.disabled = false; });
   }
 }
 
@@ -672,15 +628,16 @@ function renderPeers() {
     return;
   }
   // 状态语义：绿点 = 对方 Tailsend 真能收（可发送）；琥珀 = 节点在线但对方
-  // Tailsend 没开；蓝 = 在线探测中；灰 = 离线。状态词做成名字行的小徽章。
+  // Tailsend 没开；灰 = 离线。徽章只说结论——探测中的暂态不给字，免噪音。
   const sClass = (p) =>
     p.recv === true ? "s-ok" : p.recv === false && p.online ? "s-idle"
     : p.online ? "s-on" : "s-probe";
   const stat = (p) =>
     p.recv === true ? '<i class="stat b-ok">可发送</i>'
     : p.recv === false && p.online ? '<i class="stat b-idle">未运行</i>'
-    : p.online ? '<i class="stat b-on">在线</i>'
-    : '<i class="stat b-dim">离线</i>';
+    : p.lan ? '<i class="stat b-lan">局域网</i>'
+    : !p.online ? '<i class="stat b-dim">离线</i>'
+    : "";
   // 本机固定在列表最上面：标出、不可选。用户明确定调过——保留可见性，
   // 点击解释原因，避免"我的手机怎么不在列表里"的困惑。
   const selfRow = selfIp
@@ -1236,7 +1193,6 @@ function bindAll(action, fn) {
 const onAll = (action, fn) => bindAll(action, (el) => { el.onclick = fn; });
 
 function wire() {
-  bindAll("peers-refresh", (b) => { b.onclick = loadPeers; });
   bindAll("manual-use", (b) => {
     b.onclick = () => setManualTarget(b.closest(".manual").querySelector(".manual-in"));
   });
@@ -1282,7 +1238,6 @@ function wire() {
       toast(on ? "接收前会先确认每个传输" : "已开启自动接收，不再询问", "ok");
     };
   });
-  bindAll("recv-master", (b) => { b.onclick = nodeToggleRecv; });
   $("req-deny").onclick = () => answerRequest(false);
   $("req-accept").onclick = () => answerRequest(true);
 
@@ -1434,7 +1389,14 @@ function wire() {
       const r = await invoke("pick_files");
       if (r && r.length) await addFromPaths(r);
       repaint();
-    } catch (e) { if (!/cancel/i.test(String(e))) toast(String(e), "err"); }
+    } catch (e) {
+      const why = String(e);
+      if (/cancel/i.test(why)) return;
+      // 手机上原生选择器不可用就退到 webview 选择器——按钮只有一个，
+      // 不能让唯一的入口死掉。
+      if (platform === "mobile") { $$(".file-in").forEach((i) => i.click()); return; }
+      toast(why, "err");
+    }
   });
   onAll("pickdir", async () => {
     try {
@@ -1443,7 +1405,6 @@ function wire() {
       repaint();
     } catch (e) { if (!/cancel/i.test(String(e))) toast(String(e), "err"); }
   });
-  onAll("inputfile", () => { $$(".file-in").forEach((i) => i.click()); });
   $$(".file-in").forEach((inp) => {
     inp.addEventListener("change", (e) => {
       [...e.target.files].forEach(addFromFile);

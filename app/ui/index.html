@@ -31,11 +31,6 @@
       <span class="name">Tailsend</span>
       <span class="ver" id="ver"></span>
     </div>
-    <div class="statusbar">
-      <span class="seg" id="chip-self">本机：读取中…</span>
-      <span class="seg" id="chip-recv"><i class="dot"></i>接收端检测中…</span>
-      <span class="seg" id="chip-dir" hidden></span>
-    </div>
   </header>
 
   <!-- 桌面侧栏：发送 / 接收 / 本机 -->
@@ -69,12 +64,11 @@
         </svg>
         <div class="drop-copy">
           <p class="drop-title">拖入文件或文件夹</p>
-          <p class="drop-hint">超过 1GB 的文件请用「选择文件」走原生通道</p>
+          <p class="drop-hint">大于 1GB 请用按钮选择</p>
         </div>
         <div class="drop-btns">
           <button class="primary" data-action="pick">选择文件</button>
           <button class="ghost" data-action="pickdir">文件夹</button>
-          <button class="ghost" data-action="inputfile">界面选择</button>
         </div>
         <input type="file" class="file-in" multiple hidden />
         <input type="file" class="dir-in" webkitdirectory multiple hidden />
@@ -95,9 +89,6 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></svg>
               <input data-action="peer-search" type="text" placeholder="搜索名称或 IP" spellcheck="false" />
             </label>
-            <button class="ghost icon" data-action="peers-refresh" title="重新扫描" aria-label="重新扫描">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v4h-4"/></svg>
-            </button>
           </div>
         </div>
         <div class="devs" data-mount="peers">
@@ -122,24 +113,17 @@
 
     <!-- ====================================================== 接收 -->
     <section class="view" id="view-recv">
-      <section class="hero">
-        <div class="radar" aria-hidden="true">
-          <i></i><i></i><i></i>
-          <svg class="radar-mark" viewBox="0 0 24 24"><path d="M12 3v10m0 0 4-4m-4 4-4-4"/><path d="M4 14v4a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-4"/></svg>
-        </div>
-        <div class="hero-copy">
-          <p class="h-state" data-mount="recv-meta">检测中…</p>
-          <p class="h-dir" data-mount="recv-hint" hidden></p>
-        </div>
-        <div class="hero-actions">
-          <button class="ghost" data-action="open-inbox">打开文件夹</button>
-          <button class="switch" data-action="recv-master" aria-pressed="false" aria-label="开启或关闭接收"></button>
-        </div>
-      </section>
+      <div class="recv-status" data-mount="recv-status">
+        <p data-mount="recv-meta">检测中…</p>
+        <p class="sub" data-mount="recv-hint" hidden></p>
+      </div>
 
       <section class="panel">
         <div class="panel-head">
           <h2>收到的文件 <span class="count" data-mount="inbox-count"></span></h2>
+          <button class="ghost icon" data-action="open-inbox" title="打开文件夹" aria-label="打开文件夹">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5A1.5 1.5 0 0 1 5 5h4l2 2.5h8A1.5 1.5 0 0 1 20.5 9v8A1.5 1.5 0 0 1 19 18.5H5A1.5 1.5 0 0 1 3.5 17Z"/></svg>
+          </button>
         </div>
         <ul class="inbox" data-mount="inbox"></ul>
       </section>
@@ -183,7 +167,6 @@
                  placeholder="接收令牌（留空 = 不校验）" />
           <button class="ghost" data-action="token-save">保存</button>
         </div>
-        <button class="ghost wide" data-action="open-inbox">打开收件文件夹</button>
       </section>
     </section>
   </main>
