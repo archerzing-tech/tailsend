@@ -81,8 +81,16 @@ pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
-    let out = tokio::process::Command::new(cli_bin())
-        .args(["status", "--json"])
+    let mut cmd = tokio::process::Command::new(cli_bin());
+    cmd.args(["status", "--json"]);
+    #[cfg(target_os = "windows")]
+    {
+        // The CLI is a console program and the UI polls this constantly —
+        // without CREATE_NO_WINDOW every poll flashes a console window.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
         .output()
         .await
         .map_err(|_| format!("无法运行 {}：请确认已安装 Tailscale", cli_bin()))?;
@@ -92,6 +100,9 @@ pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
     }
     let st: TsStatus = serde_json::from_slice(&out.stdout)
         .map_err(|e| format!("解析 tailscale status 输出失败：{e}"))?;
+
+    // Grab before `self_` is consumed for SelfInfo below.
+    let self_ips = st.self_.as_ref().map(|s| s.tailscale_ips.clone()).unwrap_or_default();
 
     let self_info = st
         .self_
@@ -109,10 +120,14 @@ pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
         },
     };
 
+    // Some tailscale builds keep this machine inside `Peer` as well — the
+    // CLI's own status on macOS does. Sending to yourself isn't a thing, so
+    // keep the self entry out of the list (the UI shows 本机 separately).
     let mut peers: Vec<Peer> = st
         .peers
         .values()
         .filter_map(|p| node_from(p, false))
+        .filter(|p| !p.ip.is_empty() && !self_ips.iter().any(|s| *s == p.ip))
         .collect();
     peers.sort_by(|a, b| match (a.online, b.online) {
         (true, false) => std::cmp::Ordering::Less,
