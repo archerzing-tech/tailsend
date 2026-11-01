@@ -162,6 +162,32 @@ async function pollNode() {
       updateRow(item);
     }
   }
+  // Go 接收器的收件确认只住在 Kotlin 的 pending 表里，Rust 的
+  // incoming-request 事件看不见——没人问就永远不弹窗，发送端 30 秒后超时
+  // 拒收。节点在跑时随本次轮询捎带拉一次，转成同样的弹窗。
+  if (platform === "mobile" && st && st.state === "running") {
+    try {
+      const pd = await invoke("node_pending");
+      const asks = (pd && pd.asks) || [];
+      const seen = new Set();
+      for (const a of asks) {
+        if (!a || !a.id) continue;
+        seen.add(a.id);
+        if (goAsks.has(a.id)) continue;
+        goAsks.add(a.id);
+        const names = Array.isArray(a.names) ? a.names : [];
+        showRequest({
+          id: a.id,
+          sender: a.sender,
+          count: a.count,
+          total: a.total,
+          files: names.map((n) => ({ name: String(n), size: 0 })),
+        });
+      }
+      // 已应答/已超时的 ask 从 Go 侧消失了——清掉我们的路由标记。
+      for (const id of goAsks) if (!seen.has(id)) goAsks.delete(id);
+    } catch { /* 节点暂未就绪，下一轮再试 */ }
+  }
 }
 
 function nodeErr(e) { toast(String((e && e.message) || e), "err"); }
@@ -923,6 +949,9 @@ let autoNodeTried = false; // one node-ensure attempt per app launch (mobile)
 let peersFixState = null; // discovery failure state for the fix panel (desktop)
 let daemonDownStruck = false; // daemon_down seen on the previous poll
 let autoSvcTried = false; // one auto service-start per app launch (desktop)
+// 内置节点（Go 接收器）的收件确认 id 集合：这些请求经 Kotlin pending 中转，
+// Rust 的 request_respond 够不着它们，应答时要走 node_respond 分开路由。
+const goAsks = new Set();
 
 function showRequest(p) {
   reqQueue.push(p);
@@ -940,7 +969,7 @@ function nextRequest() {
   const shown = (p.files || []).slice(0, 8);
   list.innerHTML = shown.map((f) => {
     const k = fileKind(f.name);
-    return `<li><span class="itic k-${k}" aria-hidden="true">${FILE_ICONS[k]}</span><span class="rfn">${esc(f.name)}</span><span class="rfs">${fmtSize(f.size)}</span></li>`;
+    return `<li><span class="itic k-${k}" aria-hidden="true">${FILE_ICONS[k]}</span><span class="rfn">${esc(f.name)}</span><span class="rfs">${f.size ? fmtSize(f.size) : ""}</span></li>`;
   }).join("") + (p.count > shown.length ? `<li class="rfmore">… 等共 ${p.count} 个文件</li>` : "");
   const ring = $("req-ring");
   ring.classList.remove("low");
@@ -982,7 +1011,15 @@ async function answerRequest(accept) {
   reqCur = null;
   $("req-backdrop").hidden = true;
   if (id) {
-    try { await invoke("request_respond", { id, accept }); }
+    try {
+      // Go 接收器的确认要回给 Kotlin；Rust 接收器的走 oneshot 表。
+      if (goAsks.has(id)) {
+        goAsks.delete(id);
+        await invoke("node_respond", { id, accept });
+      } else {
+        await invoke("request_respond", { id, accept });
+      }
+    }
     catch (e) { toast(String((e && e.message) || e), "err"); }
   }
   nextRequest();

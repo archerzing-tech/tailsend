@@ -542,7 +542,7 @@ pub async fn send_data_begin(
     name: String,
     size: u64,
     req_id: Option<String>,
-) -> Result<u64, String> {
+) -> Result<serde_json::Value, String> {
     if size > DATA_CAP {
         return Err(format!(
             "通过界面选择的大文件上限为 {}，更大的文件请在桌面端用「打开文件选择器」发送",
@@ -566,7 +566,11 @@ pub async fn send_data_begin(
                     .lock()
                     .unwrap()
                     .insert(id, Slot::NodeTemp { file: path.0, path: path.1, target });
-                return Ok(id);
+                // Tauri ships bare primitives to JS as raw literals
+                // (`runCallback(id, 5)`) — `const { id } = 5` yields undefined
+                // and every later chunk dies with `invalid args "id"`. Always
+                // return an object.
+                return Ok(json!({ "id": id }));
             }
             return Err("跨网地址需要内置节点在线：请在「本机」页启动并登录 Tailscale 后再发送".into());
         }
@@ -607,7 +611,7 @@ pub async fn send_data_begin(
         .lock()
         .unwrap()
         .insert(id, Slot::Stream { tx, done: done_rx });
-    Ok(id)
+    Ok(json!({ "id": id }))
 }
 
 #[tauri::command]
