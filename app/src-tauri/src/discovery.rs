@@ -46,7 +46,8 @@ struct TsPeer {
 }
 
 // The App Store build of Tailscale on macOS doesn't put the CLI on PATH.
-fn cli_bin() -> String {
+// Also used by the login/service-fix commands.
+pub fn cli_bin() -> String {
     let exe = if cfg!(windows) {
         "tailscale.exe"
     } else {
@@ -88,8 +89,31 @@ pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
     Err("移动端无法读取本机 Tailscale 节点列表，请手动输入对方的 IP 或主机名".into())
 }
 
+// Discovery failed — but with a reason the UI can act on: `state` picks the
+// peers page's guidance button (install / start / connect), `message` is the
+// one-liner for the banner.
+#[derive(Serialize, Clone)]
+pub struct DiscoveredErr {
+    pub state: String, // "cli_missing" | "daemon_down" | "logged_out" | "error"
+    pub message: String,
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub async fn status_detailed() -> Result<(SelfInfo, Vec<Peer>), DiscoveredErr> {
+    status()
+        .await
+        .map_err(|e| DiscoveredErr { state: "error".into(), message: e })
+}
+
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
+    status_detailed().await.map_err(|e| e.message)
+}
+
+// Same as status(), but the failure says which link in the chain broke — CLI
+// absent, backend service down, or tailnet login missing.
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub async fn status_detailed() -> Result<(SelfInfo, Vec<Peer>), DiscoveredErr> {
     let mut cmd = tokio::process::Command::new(cli_bin());
     cmd.args(["status", "--json"]);
     #[cfg(target_os = "windows")]
@@ -102,15 +126,41 @@ pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
     let out = cmd
         .output()
         .await
-        .map_err(|_| {
-            "没有找到 Tailscale 命令行（CLI）：请确认已安装并至少打开过一次 Tailscale 客户端".to_string()
+        .map_err(|_| DiscoveredErr {
+            state: "cli_missing".into(),
+            message: "没有找到 Tailscale 命令行（CLI）：请确认已安装并至少打开过一次 Tailscale 客户端"
+                .to_string(),
         })?;
     if !out.status.success() {
-        let msg = String::from_utf8_lossy(&out.stderr);
-        return Err(format!("tailscale status 失败：{}", msg.trim()));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let low = stderr.to_lowercase();
+        return Err(if low.contains("logged out") {
+            DiscoveredErr { state: "logged_out".into(), message: "Tailscale 还没连接（未登录）".into() }
+        } else if low.contains("unable to connect")
+            || low.contains("failed to connect")
+            || low.contains("no such file")
+            || low.contains("pipe")
+        {
+            DiscoveredErr { state: "daemon_down".into(), message: "Tailscale 服务没在运行".into() }
+        } else {
+            DiscoveredErr {
+                state: "error".into(),
+                message: format!("tailscale status 失败：{}", stderr.trim()),
+            }
+        });
     }
     let st: TsStatus = serde_json::from_slice(&out.stdout)
-        .map_err(|e| format!("解析 tailscale status 输出失败：{e}"))?;
+        .map_err(|e| DiscoveredErr { state: "error".into(), message: format!("解析 tailscale status 输出失败：{e}") })?;
+
+    // Backend reachable but the tailnet login isn't: "Stopped" is a user
+    // disconnect, "NoState" a fresh install that never connected, "NeedsLogin"
+    // an expired/missing session. All three mean: no node list exists yet.
+    if matches!(st.backend_state.as_str(), "NeedsLogin" | "Stopped" | "NoState") {
+        return Err(DiscoveredErr {
+            state: "logged_out".into(),
+            message: "Tailscale 还没连接（未登录）".into(),
+        });
+    }
 
     // Grab before `self_` is consumed for SelfInfo below.
     let self_ips = st.self_.as_ref().map(|s| s.tailscale_ips.clone()).unwrap_or_default();

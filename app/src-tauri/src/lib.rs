@@ -13,6 +13,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::list_peers,
+            commands::open_url,
+            commands::tailscale_login,
+            commands::tailscale_start_service,
             commands::ping_peer,
             commands::discover_peers,
             commands::restart_receiver,

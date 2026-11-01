@@ -794,6 +794,20 @@ body[data-platform="mobile"] .fx-del { opacity: 1; }
   padding: 20px 12px;
 }
 
+/* 设备列表的 Tailscale 修复引导按钮（未装 / 服务没跑 / 未登录） */
+.empty .fix-btn {
+  margin-top: 12px;
+  height: var(--ctl-h);
+  padding: 0 18px;
+  border-radius: var(--r-btn);
+  background: var(--blue);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+}
+.empty .fix-btn:hover { background: var(--blue-deep); }
+.empty .fix-btn:active { transform: translateY(1px); }
+
 /* 搜索框 */
 .search {
   display: flex;

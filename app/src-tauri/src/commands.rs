@@ -18,11 +18,142 @@ pub async fn get_status(state: tauri::State<'_, AppState>) -> Result<serde_json:
 
 #[tauri::command]
 pub async fn list_peers() -> serde_json::Value {
-    match discovery::status().await {
+    match discovery::status_detailed().await {
         Ok((self_info, peers)) => {
             serde_json::json!({ "self": self_info, "peers": peers, "error": serde_json::Value::Null })
         }
-        Err(e) => serde_json::json!({ "self": serde_json::Value::Null, "peers": [], "error": e }),
+        // `state` tells the UI which fix button to offer: install / start /
+        // connect. Absent on success and on uncategorized errors.
+        Err(e) => serde_json::json!({
+            "self": serde_json::Value::Null,
+            "peers": [],
+            "error": e.message,
+            "state": e.state,
+        }),
+    }
+}
+
+// Desktop helpers behind the peers page's Tailscale guidance buttons. Mobile
+// runs the embedded tsnet node instead, so none of these apply there.
+
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = &url;
+        return Err("移动端请在系统浏览器里打开链接".into());
+    }
+    // Only pass through web links — an unrestricted opener command would be
+    // a hole (file://, shell: …).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        if !url.starts_with("https://") && !url.starts_with("http://") {
+            return Err("只支持打开网页链接".into());
+        }
+        #[cfg(target_os = "macos")]
+        let r = std::process::Command::new("open").arg(&url).spawn();
+        #[cfg(target_os = "windows")]
+        // `start` needs a placeholder window title so & in URLs survives.
+        let r = std::process::Command::new("cmd").args(["/c", "start", "", &url]).spawn();
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let r = std::process::Command::new("xdg-open").arg(&url).spawn();
+        r.map(|_| ()).map_err(|e| format!("打开浏览器失败：{e}"))
+    }
+}
+
+#[tauri::command]
+pub async fn tailscale_start_service() -> Result<(), String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return Err("移动端走内置节点，无需启动 Tailscale".into());
+    #[cfg(target_os = "macos")]
+    {
+        // Launching the app connects its backend if a login is on file.
+        let r = tokio::process::Command::new("open").args(["-a", "Tailscale"]).status().await;
+        return match r {
+            Ok(s) if s.success() => Ok(()),
+            _ => Err("没有找到 Tailscale——请先安装 Tailscale".into()),
+        };
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // The backend runs as a Windows service; starting it needs one
+        // elevated prompt. `-Verb runAs` raises it — the user sees UAC once.
+        // `Get-Service Tailscale*` spares us guessing the exact service name.
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let script = "Start-Process powershell -Verb runAs -Wait -ArgumentList '-NoProfile','-Command','Get-Service Tailscale* | Start-Service'";
+        let out = tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .await
+            .map_err(|e| format!("无法调用 PowerShell：{e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err("没有拿到管理员授权（取消了弹窗？）——也可以手动打开 Tailscale".into())
+        }
+    }
+    #[cfg(all(
+        unix,
+        not(target_os = "macos"),
+        not(any(target_os = "android", target_os = "ios"))
+    ))]
+    {
+        let r = tokio::process::Command::new("pkexec")
+            .args(["systemctl", "start", "tailscaled"])
+            .status()
+            .await;
+        match r {
+            Ok(s) if s.success() => Ok(()),
+            _ => Err("启动 tailscaled 失败——请手动执行：sudo systemctl start tailscaled".into()),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn tailscale_login() -> Result<String, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    return Err("移动端走内置节点登录，无需这一步".into());
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        use std::process::Stdio;
+        use tokio::io::AsyncBufReadExt;
+        let mut cmd = tokio::process::Command::new(discovery::cli_bin());
+        cmd.arg("login")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(target_os = "windows")]
+        {
+            // Console program spawned from a GUI app — never flash a window.
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("无法启动 Tailscale CLI：{e}"))?;
+        // `login` prints the auth URL then blocks until the browser flow
+        // finishes. We only need the URL: the local backend completes the
+        // login on its own, so grabbing it and dropping the CLI is enough.
+        let url = {
+            let out = child.stdout.take().ok_or("无法读取登录输出")?;
+            let mut lines = tokio::io::BufReader::new(out).lines();
+            loop {
+                match tokio::time::timeout(std::time::Duration::from_secs(15), lines.next_line()).await {
+                    Ok(Ok(Some(line))) => {
+                        if let Some(u) = line
+                            .split_whitespace()
+                            .find(|s| s.starts_with("https://login.tailscale.com/"))
+                        {
+                            break u.to_string();
+                        }
+                    }
+                    // EOF (already logged in) or timeout — nothing to open.
+                    _ => break String::new(),
+                }
+            }
+        };
+        drop(child); // kill_on_drop — don't leave the CLI hanging around
+        Ok(url)
     }
 }
 

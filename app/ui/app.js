@@ -459,7 +459,7 @@ async function loadPeers() {
       } else if (!saved.length) {
         // Saved targets still render below — only nag when there is nothing.
         bannerShow(d.error + "。不影响接收；也可以直接输入对方 IP 发送。");
-        mount("peers").forEach((n) => { n.innerHTML = '<div class="empty">暂时无法读取设备列表</div>'; });
+        mount("peers").forEach((n) => { n.innerHTML = peersFixHtml(d.state); });
         peers = [];
       } else {
         peers = [];
@@ -556,6 +556,49 @@ async function loadPeers() {
     peersLoading = false;
     bindAll("peers-refresh", (b) => { b.disabled = false; });
   }
+}
+
+/* ------------------------------------------------- Tailscale fix guidance */
+// Desktop discovery fails for exactly three reasons; each gets one button
+// that actually moves the user forward (不让用户猜，能想到的都给到).
+const peersFix = {
+  cli_missing: { btn: "安装 Tailscale", act: "download",
+    tip: "没有找到 Tailscale——装好并登录后，设备会自动出现在这里" },
+  daemon_down: { btn: "启动 Tailscale", act: "start",
+    tip: "Tailscale 服务没在运行——点按钮拉起它（Windows 会弹一次管理员授权）" },
+  logged_out: { btn: "连接 Tailscale", act: "login",
+    tip: "Tailscale 已装好但还没连接——点按钮在浏览器完成登录" },
+};
+function peersFixHtml(state) {
+  const f = peersFix[state];
+  if (!f) return '<div class="empty">暂时无法读取设备列表</div>';
+  return `<div class="empty">${f.tip}<br><button class="fix-btn" data-peers-fix="${f.act}">${f.btn}</button></div>`;
+}
+let peersBoost = null; // fix action fired → poll fast so the list snaps in
+function boostPeers() {
+  if (peersBoost) return;
+  const until = Date.now() + 120000;
+  peersBoost = setInterval(() => {
+    if (Date.now() > until) { clearInterval(peersBoost); peersBoost = null; return; }
+    loadPeers();
+  }, 4000);
+}
+async function peersFixAction(act) {
+  try {
+    if (act === "download") {
+      await invoke("open_url", { url: "https://tailscale.com/download" });
+    } else if (act === "start") {
+      await invoke("tailscale_start_service");
+      toast("已发起启动——授权通过后设备会自动出现", "ok");
+    } else if (act === "login") {
+      const url = await invoke("tailscale_login");
+      if (!url) toast("Tailscale 已在连接状态，几秒后设备自动出现", "ok");
+      else toast("登录页已在浏览器打开，完成后这里自动刷新", "ok");
+    }
+  } catch (e) {
+    toast(String(e), "err");
+  }
+  boostPeers();
 }
 
 function renderPeers() {
@@ -1252,6 +1295,11 @@ function wire() {
   // 设备卡片：点选 + 键盘 + 移除常用（事件委托，网格整体重绘）
   mount("peers").forEach((el) => {
     el.addEventListener("click", (e) => {
+      const fix = e.target.closest("[data-peers-fix]");
+      if (fix) {
+        peersFixAction(fix.dataset.peersFix);
+        return;
+      }
       const del = e.target.closest(".fx-del");
       if (del) {
         e.stopPropagation();
