@@ -541,17 +541,24 @@ pub async fn send_data_begin(
     }
     // Embedded-node route: no OS VPN, so the Rust sender can't reach the
     // tailnet — stage the bytes to a temp file and let Go do consent +
-    // upload through tsnet (send_data_end triggers it).
+    // upload through tsnet (send_data_end triggers it). Only tailnet
+    // destinations go this way: tsnet has no route for LAN/internet
+    // addresses, so feeding it 192.168.x blackholes the send (each file
+    // burns the full consent timeout before failing, and the UI sits
+    // locked on 「发送中」 the whole time).
     {
         let node = app.state::<NodeState>();
-        if let Some(path) = node_stage_begin(&app, &state, &node, &name).await? {
-            let id = state.next_data_id();
-            state
-                .slots
-                .lock()
-                .unwrap()
-                .insert(id, Slot::NodeTemp { file: path.0, path: path.1, target });
-            return Ok(id);
+        if needs_node_route(&target) {
+            if let Some(path) = node_stage_begin(&app, &state, &node, &name).await? {
+                let id = state.next_data_id();
+                state
+                    .slots
+                    .lock()
+                    .unwrap()
+                    .insert(id, Slot::NodeTemp { file: path.0, path: path.1, target });
+                return Ok(id);
+            }
+            return Err("跨网地址需要内置节点在线：请在「本机」页启动并登录 Tailscale 后再发送".into());
         }
     }
     let (ip, port) = discovery::find_target(&target, netcore::DEFAULT_PORT).await?;
@@ -669,6 +676,36 @@ pub async fn send_data_end(
             }
             Ok(())
         }
+    }
+}
+
+// True when only the embedded tsnet node can reach the target: tailnet IPs
+// (Tailscale CGNAT v4, the fd7a:115c:a1e0::/48 ULA) and hostnames (MagicDNS
+// resolves only inside the node). LAN and internet IPs the Rust sender
+// reaches directly — parse order mirrors discovery::find_target.
+fn needs_node_route(target: &str) -> bool {
+    let t = target.trim();
+    if let Ok(sa) = t.parse::<std::net::SocketAddr>() {
+        return tailnet_ip(sa.ip());
+    }
+    if let Ok(ip) = t.parse::<std::net::IpAddr>() {
+        return tailnet_ip(ip);
+    }
+    let host = match t.rsplit_once(':') {
+        Some((h, p)) if !h.is_empty() && p.parse::<u16>().map(|pp| pp > 0).unwrap_or(false) => h,
+        _ => t,
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    host.parse::<std::net::IpAddr>().map_or(true, tailnet_ip)
+}
+
+fn tailnet_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            o[0] == 100 && (64..=127).contains(&o[1])
+        }
+        std::net::IpAddr::V6(v6) => v6.octets()[..6] == [0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0],
     }
 }
 
@@ -1108,4 +1145,41 @@ pub async fn node_open_login(state: tauri::State<'_, NodeState>) -> Result<serde
 #[tauri::command]
 pub async fn node_peers(state: tauri::State<'_, NodeState>) -> Result<serde_json::Value, String> {
     state.call("node_peers", json!({})).await
+}
+
+#[cfg(test)]
+mod route_tests {
+    use super::{needs_node_route, tailnet_ip};
+
+    #[test]
+    fn lan_and_internet_targets_dial_directly() {
+        // Same-Wi-Fi peers (the LAN discovery channel) must never enter the
+        // embedded node — tsnet has no route there and the send stalls.
+        assert!(!needs_node_route("192.168.1.5:4782"));
+        assert!(!needs_node_route("192.168.1.5"));
+        assert!(!needs_node_route("10.0.0.2"));
+        assert!(!needs_node_route("172.16.4.9:4782"));
+        assert!(!needs_node_route("8.8.8.8:4782"));
+        assert!(!needs_node_route("127.0.0.1:4782"));
+    }
+
+    #[test]
+    fn tailnet_targets_stage_through_the_node() {
+        assert!(needs_node_route("100.101.1.2:4782"));
+        assert!(needs_node_route("100.64.0.1"));
+        assert!(needs_node_route("100.127.255.9:4782"));
+        assert!(needs_node_route("fd7a:115c:a1e0:1234::56"));
+        assert!(needs_node_route("[fd7a:115c:a1e0::1]:4782"));
+        // Names resolve (and route) only through the node's MagicDNS.
+        assert!(needs_node_route("magicpc.tail1234.ts.net"));
+        assert!(needs_node_route("magicpc.tail1234.ts.net:4782"));
+    }
+
+    #[test]
+    fn cgnat_boundary_is_exact() {
+        assert!(!tailnet_ip("100.63.255.255".parse().unwrap()));
+        assert!(tailnet_ip("100.64.0.0".parse().unwrap()));
+        assert!(tailnet_ip("100.127.255.255".parse().unwrap()));
+        assert!(!tailnet_ip("100.128.0.0".parse().unwrap()));
+    }
 }

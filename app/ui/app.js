@@ -1057,7 +1057,18 @@ async function send() {
             entries: [{ path: item.path, rel: item.rel, size: item.size }],
             reqId: reqId || null,
           });
-          await new Promise((res, rej) => pendingBatch.set("p:" + batch, { item, res, rej }));
+          await new Promise((res, rej) => {
+            // The Rust task fires events from a spawned task; a fast local
+            // push can beat the invoke() reply back into JS. Late results
+            // are parked in doneBatches so the wait still settles.
+            const hit = doneBatches.get(batch);
+            if (hit) {
+              doneBatches.delete(batch);
+              hit.ok ? res() : rej(new Error(hit.error || "发送失败"));
+              return;
+            }
+            pendingBatch.set("p:" + batch, { item, res, rej });
+          });
         } else {
           await sendData(item, pt.t.addr, reqId);
         }
@@ -1443,6 +1454,13 @@ function wire() {
     if (pb) {
       pendingBatch.delete("p:" + p.batch);
       p.ok ? pb.res() : pb.rej(new Error(p.error || "发送失败"));
+    } else {
+      // No waiter yet: the invoke() reply is still in flight — park the
+      // outcome for the wait to pick up instead of dropping it.
+      doneBatches.set(p.batch, p);
+      if (doneBatches.size > 64) {
+        doneBatches.delete(doneBatches.keys().next().value);
+      }
     }
   });
 
@@ -1486,6 +1504,7 @@ let items = [];
 let itemSeq = 0;
 let sending = false;
 const pendingBatch = new Map(); // batch id -> { item, res, rej }
+const doneBatches = new Map(); // send-file events that arrived before their waiter
 const knownInbox = new Set();
 
 (async () => {

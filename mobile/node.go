@@ -9,6 +9,7 @@
 package mobile
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -116,7 +117,11 @@ func (n *Node) startAsync() error {
 		ip4, _ := s.TailscaleIPs()
 		// Route the sender engine through the node's userspace WireGuard:
 		// a plain net dialer can't reach 100.x addresses without the OS VPN.
-		core.SetDialContext(s.Dial)
+		// makeDial keeps LAN/internet addresses off the netstack — tsnet has
+		// no route for them and the dial would hang until the HTTP client
+		// gives up (discovered LAN peers were unreachable for exactly this
+		// reason).
+		core.SetDialContext(makeDial(s))
 		n.mu.Lock()
 		n.state = "running"
 		n.ip = ip4.String()
@@ -413,6 +418,38 @@ func (n *Node) PingTarget(addr, token string) string {
 	}
 	b, _ := json.Marshal(pr)
 	return string(b)
+}
+
+// makeDial wraps the node's tsnet dialer with a plain-dialer fallback:
+// tsnet routes only the tailnet, so LAN and internet addresses dial
+// directly through the OS; 100.x/fd7a IPs and names (MagicDNS) stay inside
+// the node.
+func makeDial(s *tsnet.Server) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	plain := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil || tailnetAddr(host) {
+			return s.Dial(ctx, network, addr)
+		}
+		return plain.DialContext(ctx, network, addr)
+	}
+}
+
+// tailnetAddr reports whether host is an address only tsnet can route:
+// the Tailscale CGNAT v4 range (100.64/10) or the tailnet ULA v6 prefix
+// (fd7a:115c:a1e0::/48). Anything unparseable is treated as a name, which
+// also only resolves inside the tailnet.
+func tailnetAddr(host string) bool {
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
+	}
+	v6 := ip.To16()
+	tailnetULA := []byte{0xfd, 0x7a, 0x11, 0x5c, 0xa1, 0xe0}
+	return v6 != nil && bytes.Equal(v6[:6], tailnetULA)
 }
 
 // SendFiles asks addr for consent (protocol v3) then uploads every path,
