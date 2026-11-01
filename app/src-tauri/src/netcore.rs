@@ -538,6 +538,26 @@ pub struct Upload {
 
 pub type UploadRegistry = Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Upload>>>>>;
 
+// Inbox progress feed: temp-file basename → (bytes received, declared total).
+// A temp in the registry is a Rust-side v2 upload; Go-side and v1 temps stay
+// absent, and the UI shows those as an indeterminate bar. Chunk coverage is
+// approximated as chunks*chunk (the tail chunk counts whole, clamped below).
+pub fn upload_progress(reg: &UploadRegistry) -> HashMap<String, (u64, u64)> {
+    let mut m = HashMap::new();
+    for up in reg.lock().unwrap().values() {
+        // blocking_lock is fine here: callers run off the async runtime, and a
+        // held guard only means one 4 MiB chunk write is in flight.
+        let u = up.blocking_lock();
+        if let Some(name) = u.tmp.file_name().and_then(|n| n.to_str()) {
+            let got = (u.received.len() as u64)
+                .saturating_mul(u.chunk)
+                .min(u.size);
+            m.insert(name.to_string(), (got, u.size));
+        }
+    }
+    m
+}
+
 static UPLOAD_SEQ: AtomicU64 = AtomicU64::new(0);
 
 fn new_upload_id() -> String {

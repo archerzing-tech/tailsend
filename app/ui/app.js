@@ -425,7 +425,16 @@ async function loadPeers() {
   peersLoading = true;
   bindAll("peers-refresh", (b) => { b.disabled = true; });
   try {
-    const d = await invoke("list_peers");
+    // 内置节点在跑：tsnet 自己就握着整个 tailnet 的设备表，不依赖 CLI
+    // （手机上 CLI 永远不存在）。失败或未跑再走 list_peers/discover 老路。
+    let d = null;
+    if (nodeRunning) {
+      try {
+        const np = await invoke("node_peers");
+        if (np && Array.isArray(np.peers)) d = { error: null, self: np.self || null, peers: np.peers };
+      } catch { /* fall back below */ }
+    }
+    if (!d) d = await invoke("list_peers");
     const saved = loadSaved();
     if (d.error) {
       // Saved targets still render below — only nag when there is nothing.
@@ -1016,11 +1025,18 @@ let armedDelete = null;
 let lastInboxKey = null; // 空 inbox 的 key 是 ""，初始必须不同才能画出空态文案
 
 const inboxKey = (files) =>
-  files.map((f) => `${f.incoming ? "~" : "+"}${f.path} ${f.size} ${f.mtime}`).join("|");
+  files.map((f) => `${f.incoming ? "~" : "+"}${f.path} ${f.size}/${f.total || 0} ${f.mtime}`).join("|");
+
+// 有文件从「无接收」变「接收中」的那个轮询沿，把界面带到接收页。
+// null = 首轮只观察（避免 webview 刷新/残留 temp 时一打开就跳页）。
+let hadIncoming = null;
 
 async function loadInbox() {
   try {
     const d = await invoke("inbox_list");
+    const hasIn = d.files.some((f) => f.incoming);
+    if (hasIn && hadIncoming === false) setTab("recv");
+    hadIncoming = hasIn;
     setMount("inbox-count", (el) => { el.textContent = d.total ? `（${d.total}）` : ""; });
     setMount("badge-inbox", (el) => {
       el.hidden = !d.total;
@@ -1042,15 +1058,22 @@ async function loadInbox() {
       const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
       const k = fileKind(base);
       const fresh = !f.incoming && !knownInbox.has(f.path);
-      const sub = f.incoming
-        ? `接收中 · 已收 ${fmtSize(f.size)}`
-        : `${dir ? esc(dir) + " · " : ""}${fmtSize(f.size)} · ${fmtTime(f.mtime)}`;
+      let bar = "";
+      let sub;
+      if (f.incoming) {
+        // total 缺席（Go 端或 v1 临时文件）→ 流动条；有 total → 真百分比
+        const pct = f.total ? Math.min(100, Math.round((f.size / f.total) * 100)) : 0;
+        bar = `<span class="ibar${f.total ? "" : " indet"}"><i${f.total ? ` style="width:${pct}%"` : ""}></i></span>`;
+        sub = `接收中 · 已收 ${fmtSize(f.size)}${f.total ? " / " + fmtSize(f.total) : ""}`;
+      } else {
+        sub = `${dir ? esc(dir) + " · " : ""}${fmtSize(f.size)} · ${fmtTime(f.mtime)}`;
+      }
       const del = f.incoming ? "" :
         `<button class="idel${armedDelete === f.path ? " arm" : ""}" data-path="${esc(f.path)}"
            title="删除" aria-label="删除 ${esc(base)}">${armedDelete === f.path ? "确认删除" : "✕"}</button>`;
-      return `<li class="${f.incoming ? "in " : ""}${fresh ? "new" : ""}" title="${esc(f.path)}">
+      return `<li class="${f.incoming ? "in " : ""}${fresh ? "new" : ""}" data-path="${esc(f.path)}" title="${esc(f.path)}">
         <span class="itic k-${k}">${FILE_ICONS[k]}</span>
-        <span class="imeta"><span class="iname">${esc(base)}</span><span class="isub">${sub}</span></span>${del}
+        <span class="imeta"><span class="iname">${esc(base)}</span><span class="isub">${sub}</span>${bar}</span>${del}
       </li>`;
     }).join("");
     mount("inbox").forEach((el) => { el.innerHTML = html; });
@@ -1133,11 +1156,19 @@ function wire() {
   $$(".rx-token").forEach((inp) => {
     inp.addEventListener("keydown", (e) => { if (e.key === "Enter") saveReceiverToken(inp.value); });
   });
-  // 收件箱删除：事件委托挂在列表上（列表整体重绘）
+  // 收件箱删除 + 点文件交给系统打开：事件委托挂在列表上（列表整体重绘）
   mount("inbox").forEach((el) => {
     el.addEventListener("click", async (e) => {
       const btn = e.target.closest(".idel");
-      if (!btn) return;
+      if (!btn) {
+        // 点文件名 → 系统查看器（接收中的临时文件不可开）
+        const li = e.target.closest("li[data-path]");
+        if (li && !li.classList.contains("in")) {
+          try { await invoke("open_inbox", { path: li.dataset.path }); }
+          catch (err) { toast(String(err), "err"); }
+        }
+        return;
+      }
       const p = btn.dataset.path;
       if (armedDelete !== p) {
         armedDelete = p;

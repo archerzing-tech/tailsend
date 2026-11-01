@@ -15,9 +15,9 @@ PKG_DIR="$APP/java/io/tailsend/app"
 # 1) Service source
 cp "$SRC_DIR/TailsendReceiverService.kt" "$PKG_DIR/TailsendReceiverService.kt"
 
-# 2) Manifest: permissions + <service>
+# 2) Manifest: permissions + <service> + FileProvider (tap-to-open inbox)
 python3 - "$APP/AndroidManifest.xml" <<'PYEOF'
-import sys
+import os, sys
 p = sys.argv[1]
 s = open(p).read()
 if "TailsendReceiverService" not in s:
@@ -39,7 +39,43 @@ if "TailsendReceiverService" not in s:
         '        </service>\n'
         '\n'
         '    </application>')
-    open(p, "w").write(s)
+if "FileProvider" not in s:
+    s = s.replace(
+        '    </application>',
+        '        <provider\n'
+        '            android:name="androidx.core.content.FileProvider"\n'
+        '            android:authorities="${applicationId}.fileprovider"\n'
+        '            android:exported="false"\n'
+        '            android:grantUriPermissions="true">\n'
+        '            <meta-data\n'
+        '                android:name="android.support.FILE_PROVIDER_PATHS"\n'
+        '                android:resource="@xml/file_paths" />\n'
+        '        </provider>\n'
+        '\n'
+        '    </application>')
+    xml_dir = os.path.join(os.path.dirname(p), "res", "xml")
+    os.makedirs(xml_dir, exist_ok=True)
+    fp = os.path.join(xml_dir, "file_paths.xml")
+    # Whole filesDir: the inbox roots (Tailsend/ + app_data inbox) live under
+    # it. Tauri's own file_paths.xml may already exist (camera plugins) —
+    # append our root instead of clobbering theirs.
+    entry = '  <files-path name="files" path="." />\n'
+    if not os.path.exists(fp):
+        open(fp, "w").write(
+            '<?xml version="1.0" encoding="utf-8"?>\n'
+            '<paths>\n' + entry + '</paths>\n')
+    elif "files-path" not in open(fp).read():
+        s2 = open(fp).read().replace("</paths>", entry + "</paths>")
+        open(fp, "w").write(s2)
+# Tap-to-install received APKs: the installer attributes the install to us,
+# and without this declared there is no "install unknown apps" toggle for
+# Tailsend — stock Android dead-ends the first install with no way to allow it.
+if "REQUEST_INSTALL_PACKAGES" not in s:
+    s = s.replace(
+        '<uses-permission android:name="android.permission.INTERNET" />',
+        '<uses-permission android:name="android.permission.INTERNET" />\n'
+        '    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />')
+open(p, "w").write(s)
 PYEOF
 
 # 3) MainActivity: start the service on launch (foreground start is allowed)
@@ -72,5 +108,8 @@ grep -q 'TailsendReceiverService' "$MAN"
 grep -q 'TailsendReceiverService.start(this)' "$ACT"
 grep -q 'POST_NOTIFICATIONS' "$MAN"
 grep -q 'requestPermissions' "$ACT"
+grep -q 'FileProvider' "$MAN"
+grep -q 'REQUEST_INSTALL_PACKAGES' "$MAN"
+test -f "$APP/res/xml/file_paths.xml"
 test -f "$PKG_DIR/TailsendReceiverService.kt"
 echo "foreground service applied: $MAN"

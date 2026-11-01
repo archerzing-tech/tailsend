@@ -1022,6 +1022,36 @@ body[data-platform="mobile"] .radar-mark { width: 46px; height: 46px; padding: 8
 }
 .inbox li.in .isub { color: var(--blue-ink); }
 
+/* 接收进度条：宽度跟已收/总量走；.indet = 总量未知（Go 端 / v1），流动示意 */
+.ibar {
+  display: block;
+  height: 4px;
+  margin-top: 5px;
+  border-radius: 2px;
+  background: var(--line);
+  overflow: hidden;
+}
+.ibar i {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: 2px;
+  background: var(--blue);
+  transition: width .8s ease;
+}
+.ibar.indet i {
+  width: 34%;
+  background: linear-gradient(90deg, transparent, var(--blue), transparent);
+  animation: ibar-slide 1.4s linear infinite;
+}
+@keyframes ibar-slide {
+  0% { transform: translateX(-110%); }
+  100% { transform: translateX(400%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ibar.indet i { animation: none; width: 100%; opacity: .45; }
+}
+
 .idel {
   flex: none;
   height: 26px;

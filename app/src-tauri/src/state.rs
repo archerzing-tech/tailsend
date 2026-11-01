@@ -13,6 +13,11 @@ pub struct AppState {
     // RecvCfg and owned here so answers outlive receiver restarts.
     pub consents: crate::netcore::Consents,
     pub pending: crate::netcore::PendingMap,
+    // In-flight chunked (v2) uploads, shared with the receiver via RecvCfg.
+    // Owned here so inbox_list can report per-file progress, and so the map
+    // survives receiver restarts (the janitor reaps whatever a dead receiver
+    // left behind once it goes idle).
+    pub uploads: crate::netcore::UploadRegistry,
     // Serializes start_receiver: without it a manual restart and a bootstrap
     // retry can both pass the listening check and race on the bind.
     pub start_lock: tokio::sync::Mutex<()>,
@@ -95,6 +100,7 @@ impl AppState {
                 shutdown: None,
             }),
             start_lock: tokio::sync::Mutex::new(()),
+            uploads: std::sync::Arc::default(),
             batch_seq: AtomicU64::new(1),
             data_seq: AtomicU64::new(1),
             slots: Mutex::new(HashMap::new()),
@@ -156,7 +162,7 @@ pub async fn start_receiver(app: &tauri::AppHandle, state: &AppState) -> Result<
             token: rs.token.clone(),
             max: rs.max,
             host: crate::netcore::host_name(),
-            uploads: std::sync::Arc::default(),
+            uploads: state.uploads.clone(),
             confirm: rs.confirm,
             consents: state.consents.clone(),
             pending: state.pending.clone(),

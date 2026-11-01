@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"tailscale.com/tsnet"
 	"tailsend/core"
@@ -137,6 +138,61 @@ func (n *Node) logf(format string, a ...any) {
 		n.loginURL = u
 		n.mu.Unlock()
 	}
+}
+
+// Peers reports the tailnet's device table as JSON
+// {self:{name,ip,online}, peers:[{ip,name,online,os,fqdn}]} straight from
+// the embedded node — mobile has no tailscale CLI, so this is the only way
+// the GUI can list the tailnet. Empty string = node not up enough to know.
+func (n *Node) Peers() string {
+	n.mu.Lock()
+	s := n.srv
+	n.mu.Unlock()
+	if s == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	lc, err := s.LocalClient()
+	if err != nil {
+		return ""
+	}
+	st, err := lc.Status(ctx)
+	if err != nil || st == nil {
+		return ""
+	}
+	type dev struct {
+		IP     string `json:"ip"`
+		Name   string `json:"name"`
+		Online bool   `json:"online"`
+		OS     string `json:"os"`
+		FQDN   string `json:"fqdn"`
+	}
+	out := struct {
+		Self  *dev  `json:"self,omitempty"`
+		Peers []dev `json:"peers"`
+	}{}
+	if self := st.Self; self != nil {
+		d := &dev{Name: self.HostName, Online: self.Online, OS: self.OS}
+		if len(self.TailscaleIPs) > 0 {
+			d.IP = self.TailscaleIPs[0].String()
+		}
+		out.Self = d
+	}
+	for _, p := range st.Peer {
+		d := dev{
+			Name:   p.HostName,
+			Online: p.Online,
+			OS:     p.OS,
+			FQDN:   strings.TrimSuffix(p.DNSName, "."),
+		}
+		if len(p.TailscaleIPs) > 0 {
+			d.IP = p.TailscaleIPs[0].String()
+		}
+		out.Peers = append(out.Peers, d)
+	}
+	b, _ := json.Marshal(out)
+	return string(b)
 }
 
 // Status returns a JSON snapshot for UI polling:

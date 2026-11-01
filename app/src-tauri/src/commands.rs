@@ -558,6 +558,8 @@ async fn node_stage_begin(
 struct InboxEntry {
     path: String,
     size: u64,
+    // Declared total for an in-flight file; 0 = unknown (Go-side or v1 temp).
+    total: u64,
     mtime: u64,
     #[serde(default)]
     incoming: bool,
@@ -598,6 +600,7 @@ pub async fn inbox_list(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let dir = state.recv.lock().unwrap().save_dir.clone();
+    let prog = netcore::upload_progress(&state.uploads);
     tauri::async_runtime::spawn_blocking(move || {
         let mut out: Vec<InboxEntry> = vec![];
         // (rel path, size, mtime, incoming) — in-flight temps collapse onto the
@@ -606,7 +609,7 @@ pub async fn inbox_list(
             std::collections::HashMap::new();
         let mut seen = std::collections::HashSet::new();
         for dir in inbox_roots(&app, &dir) {
-            scan_inbox_dir(&dir, &mut out, &mut incoming, &mut seen);
+            scan_inbox_dir(&dir, &prog, &mut out, &mut incoming, &mut seen);
         }
         let total = seen.len();
         let mut inc: Vec<InboxEntry> = incoming.into_values().collect();
@@ -669,15 +672,24 @@ pub async fn inbox_delete(
     .map_err(|e| e.to_string())?
 }
 
+// Tauri's app_data_dir() is Context.getDataDir() on Android — the sandbox
+// root, NOT getFilesDir(). Everything the tap-to-open FileProvider serves
+// (<files-path> = filesDir exactly) must live under filesDir, which is also
+// where the Go node keeps its state (TsnetNodePlugin uses filesDir too).
+#[cfg(target_os = "android")]
+pub fn android_files_dir(app: &tauri::AppHandle) -> Option<std::path::PathBuf> {
+    use tauri::Manager;
+    app.path().app_data_dir().ok().map(|d| d.join("files"))
+}
+
 // Every directory the inbox reads: the Rust receiver's save dir plus, on
-// Android, the embedded node's inbox (filesDir/inbox inside app data).
+// Android, the embedded node's inbox (filesDir/inbox — its state dir is filesDir).
 fn inbox_roots(app: &tauri::AppHandle, save_dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     #[allow(unused_mut)] // the push is cfg'd to android
     let mut roots = vec![save_dir.to_path_buf()];
     #[cfg(target_os = "android")]
     {
-        use tauri::Manager;
-        if let Ok(d) = app.path().app_data_dir() {
+        if let Some(d) = android_files_dir(app) {
             roots.push(d.join("inbox"));
         }
     }
@@ -688,6 +700,7 @@ fn inbox_roots(app: &tauri::AppHandle, save_dir: &std::path::Path) -> Vec<std::p
 
 fn scan_inbox_dir(
     dir: &std::path::Path,
+    prog: &std::collections::HashMap<String, (u64, u64)>,
     out: &mut Vec<InboxEntry>,
     incoming: &mut std::collections::HashMap<String, InboxEntry>,
     seen: &mut std::collections::HashSet<String>,
@@ -723,19 +736,23 @@ fn scan_inbox_dir(
                 Some(s) => s,
                 None => rel.clone(),
             };
+            let total = prog.get(fname.as_ref()).map(|(_, t)| *t).unwrap_or(0);
             let slot = incoming.entry(shown).or_insert(InboxEntry {
                 path: rel.clone(),
                 size: 0,
+                total: 0,
                 mtime: 0,
                 incoming: true,
             });
             slot.size += size; // parallel chunks land in separate temps
+            slot.total += total;
             slot.mtime = slot.mtime.max(mtime);
             continue;
         }
         out.push(InboxEntry {
             path: rel,
             size,
+            total: 0,
             mtime,
             incoming: false,
         });
@@ -743,21 +760,56 @@ fn scan_inbox_dir(
 }
 
 #[tauri::command]
-pub async fn open_inbox(state: tauri::State<'_, AppState>) -> Result<(), String> {
-    let dir = state.recv.lock().unwrap().save_dir.clone();
-    let _ = std::fs::create_dir_all(&dir);
-    #[cfg(target_os = "macos")]
-    let r = std::process::Command::new("open").arg(&dir).spawn();
-    #[cfg(target_os = "windows")]
-    let r = std::process::Command::new("explorer").arg(&dir).spawn();
-    #[cfg(target_os = "linux")]
-    let r = std::process::Command::new("xdg-open").arg(&dir).spawn();
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    let r: std::io::Result<()> = Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "移动端不支持",
-    ));
-    r.map(|_| ()).map_err(|e| e.to_string())
+pub async fn open_inbox(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    node: tauri::State<'_, NodeState>,
+    path: Option<String>,
+) -> Result<(), String> {
+    // The inbox lists paths relative to whichever root it scanned from; hand
+    // the UI's rel path back and open the root where the file actually is.
+    let hinted = matches!(path.as_deref(), None | Some(""));
+    let target = path.as_deref().filter(|p| !p.is_empty()).and_then(|p| {
+        inbox_roots(&app, &state.recv.lock().unwrap().save_dir)
+            .into_iter()
+            .map(|root| root.join(p))
+            .find(|c| c.exists())
+    });
+    // Android has no "open folder" concept — hand a single file to the
+    // system viewer via the Kotlin plugin (FileProvider + ACTION_VIEW).
+    #[cfg(target_os = "android")]
+    {
+        if hinted {
+            return Err("在收件列表里点文件名即可打开".into());
+        }
+        let p = match target {
+            Some(p) => p,
+            None => return Err("文件不存在或已被删除".into()),
+        };
+        let _: serde_json::Value =
+            node.call("open_path", json!({ "path": p.to_string_lossy() })).await?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let dir = state.recv.lock().unwrap().save_dir.clone();
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = node; // desktop: no embedded node bridge involved
+        let _ = hinted;
+        let target = target.unwrap_or(dir);
+        #[cfg(target_os = "macos")]
+        let r = std::process::Command::new("open").arg(&target).spawn();
+        #[cfg(target_os = "windows")]
+        let r = std::process::Command::new("explorer").arg(&target).spawn();
+        #[cfg(target_os = "linux")]
+        let r = std::process::Command::new("xdg-open").arg(&target).spawn();
+        #[cfg(target_os = "ios")]
+        let r: std::io::Result<()> = Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "移动端不支持",
+        ));
+        r.map(|_| ()).map_err(|e| e.to_string())
+    }
 }
 
 // ---- Embedded tsnet node (Android) ----
@@ -851,4 +903,11 @@ pub async fn node_send_files(
 #[tauri::command]
 pub async fn node_open_login(state: tauri::State<'_, NodeState>) -> Result<serde_json::Value, String> {
     state.call("open_login", json!({})).await
+}
+
+// Tailnet device table straight from the embedded node — mobile has no
+// tailscale CLI, so list_peers below can never answer there.
+#[tauri::command]
+pub async fn node_peers(state: tauri::State<'_, NodeState>) -> Result<serde_json::Value, String> {
+    state.call("node_peers", json!({})).await
 }

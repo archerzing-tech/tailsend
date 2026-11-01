@@ -40,6 +40,7 @@ pub fn run() {
             commands::node_ping_target,
             commands::node_send_files,
             commands::node_open_login,
+            commands::node_peers,
         ])
         .setup(|app| {
             // Android: dirs::download_dir() has no meaning inside an app
@@ -48,9 +49,20 @@ pub fn run() {
             #[cfg(target_os = "android")]
             {
                 use tauri::Manager;
-                if let Ok(dir) = app.path().app_data_dir() {
-                    let dir = dir.join("Tailsend");
+                // Keep the received-files dir under filesDir: the tap-to-open
+                // FileProvider only serves <files-path> (= filesDir), so files
+                // at the dataDir root could never be opened. Same home as the
+                // Go node, so one provider root covers the whole inbox.
+                if let Some(files) = commands::android_files_dir(app.handle()) {
+                    let dir = files.join("Tailsend");
                     let _ = std::fs::create_dir_all(&dir);
+                    // One-time move from the pre-FileProvider layout
+                    // (dataDir/Tailsend sat outside every provider root).
+                    if let Ok(old) = app.path().app_data_dir().map(|d| d.join("Tailsend")) {
+                        if old.is_dir() && !dir.exists() {
+                            let _ = std::fs::rename(&old, &dir);
+                        }
+                    }
                     let st = app.state::<state::AppState>();
                     st.recv.lock().unwrap().save_dir = dir;
                 }

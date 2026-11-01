@@ -186,6 +186,52 @@ class TsnetNodePlugin(private val activity: Activity) : Plugin(activity) {
   }
 
   @Command
+  fun node_peers(invoke: Invoke) {
+    val n = nodeOrReject(invoke) ?: return
+    try {
+      val raw = n.peers()
+      if (raw.isEmpty()) {
+        invoke.reject("节点未就绪，稍后再试")
+      } else {
+        invoke.resolve(JSObject.fromJSONObject(org.json.JSONObject(raw)))
+      }
+    } catch (e: Exception) {
+      invoke.reject(e.message ?: "读取节点列表失败")
+    }
+  }
+
+  // Hand a received file to the system viewer: FileProvider content:// URI +
+  // ACTION_VIEW, granted one-time read. The provider covers the whole
+  // filesDir (see res/xml/file_paths.xml), where the inbox lives.
+  @Command
+  fun open_path(invoke: Invoke) {
+    val path = invoke.getArgs().getString("path", "") ?: ""
+    val f = java.io.File(path)
+    if (!f.exists()) {
+      invoke.reject("文件不存在或已被删除")
+      return
+    }
+    try {
+      val uri = androidx.core.content.FileProvider.getUriForFile(
+        activity, activity.packageName + ".fileprovider", f,
+      )
+      val mime = activity.contentResolver.getType(uri)
+        ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(f.extension.lowercase())
+        ?: "application/octet-stream"
+      val intent = android.content.Intent(android.content.Intent.ACTION_VIEW)
+        .setDataAndType(uri, mime)
+        .addFlags(
+          android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+            android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+        )
+      activity.startActivity(intent)
+      invoke.resolve(JSObject().put("ok", true))
+    } catch (e: Exception) {
+      invoke.reject(e.message ?: "系统没有能打开这类文件的应用")
+    }
+  }
+
+  @Command
   fun ping_target(invoke: Invoke) {
     val n = nodeOrReject(invoke) ?: return
     val args = invoke.getArgs()
