@@ -39,34 +39,6 @@ if "TailsendReceiverService" not in s:
         '        </service>\n'
         '\n'
         '    </application>')
-if "FileProvider" not in s:
-    s = s.replace(
-        '    </application>',
-        '        <provider\n'
-        '            android:name="androidx.core.content.FileProvider"\n'
-        '            android:authorities="${applicationId}.fileprovider"\n'
-        '            android:exported="false"\n'
-        '            android:grantUriPermissions="true">\n'
-        '            <meta-data\n'
-        '                android:name="android.support.FILE_PROVIDER_PATHS"\n'
-        '                android:resource="@xml/file_paths" />\n'
-        '        </provider>\n'
-        '\n'
-        '    </application>')
-    xml_dir = os.path.join(os.path.dirname(p), "res", "xml")
-    os.makedirs(xml_dir, exist_ok=True)
-    fp = os.path.join(xml_dir, "file_paths.xml")
-    # Whole filesDir: the inbox roots (Tailsend/ + app_data inbox) live under
-    # it. Tauri's own file_paths.xml may already exist (camera plugins) —
-    # append our root instead of clobbering theirs.
-    entry = '  <files-path name="files" path="." />\n'
-    if not os.path.exists(fp):
-        open(fp, "w").write(
-            '<?xml version="1.0" encoding="utf-8"?>\n'
-            '<paths>\n' + entry + '</paths>\n')
-    elif "files-path" not in open(fp).read():
-        s2 = open(fp).read().replace("</paths>", entry + "</paths>")
-        open(fp, "w").write(s2)
 # Tap-to-install received APKs: the installer attributes the install to us,
 # and without this declared there is no "install unknown apps" toggle for
 # Tailsend — stock Android dead-ends the first install with no way to allow it.
@@ -77,6 +49,50 @@ if "REQUEST_INSTALL_PACKAGES" not in s:
         '    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />')
 open(p, "w").write(s)
 PYEOF
+
+# 2b) FileProvider paths for tap-to-open the inbox. The tauri template ships
+# its own FileProvider + @xml/file_paths (camera sample roots) and re-syncs
+# both into gen/ on every build — patching file_paths.xml (or adding a
+# second provider) is pointless: the append gets clobbered, and it never
+# even runs because "FileProvider" is already in the manifest. So point the
+# existing provider at our own uniquely-named resource; the sync never
+# touches files it doesn't know about.
+python3 - "$APP/AndroidManifest.xml" <<'PYEOF'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+if "tailsend_paths" not in s:
+    if "FILE_PROVIDER_PATHS" in s:
+        s = s.replace(
+            'android:resource="@xml/file_paths"',
+            'android:resource="@xml/tailsend_paths"')
+    else:
+        # Very old template with no provider at all: add ours.
+        s = s.replace(
+            '    </application>',
+            '        <provider\n'
+            '            android:name="androidx.core.content.FileProvider"\n'
+            '            android:authorities="${applicationId}.fileprovider"\n'
+            '            android:exported="false"\n'
+            '            android:grantUriPermissions="true">\n'
+            '            <meta-data\n'
+            '                android:name="android.support.FILE_PROVIDER_PATHS"\n'
+            '                android:resource="@xml/tailsend_paths" />\n'
+            '        </provider>\n'
+            '\n'
+            '    </application>')
+open(p, "w").write(s)
+PYEOF
+mkdir -p "$APP/res/xml"
+cat > "$APP/res/xml/tailsend_paths.xml" <<'XML'
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- Whole filesDir: the inbox (files/inbox, files/Tailsend) and the Go
+       node's state all live under getFilesDir(); Kotlin open_path hands
+       files from there to system viewers via this provider. -->
+  <files-path name="files" path="." />
+</paths>
+XML
 
 # 3) MainActivity: start the service on launch (foreground start is allowed)
 python3 - "$PKG_DIR/MainActivity.kt" <<'PYEOF'
@@ -109,7 +125,8 @@ grep -q 'TailsendReceiverService.start(this)' "$ACT"
 grep -q 'POST_NOTIFICATIONS' "$MAN"
 grep -q 'requestPermissions' "$ACT"
 grep -q 'FileProvider' "$MAN"
+grep -q 'tailsend_paths' "$MAN"
 grep -q 'REQUEST_INSTALL_PACKAGES' "$MAN"
-test -f "$APP/res/xml/file_paths.xml"
+test -f "$APP/res/xml/tailsend_paths.xml"
 test -f "$PKG_DIR/TailsendReceiverService.kt"
 echo "foreground service applied: $MAN"
