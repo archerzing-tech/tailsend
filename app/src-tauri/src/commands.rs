@@ -600,8 +600,13 @@ pub async fn inbox_list(
     state: tauri::State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
     let dir = state.recv.lock().unwrap().save_dir.clone();
-    let prog = netcore::upload_progress(&state.uploads);
+    let uploads = state.uploads.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // upload_progress blocking_locks tokio mutexes — it must run here, off
+        // the async runtime. Called on a worker thread it panics while holding
+        // the registry lock, poisoning it: every later receiver access
+        // (begin/chunk/complete/janitor) panics too and ALL transfers die.
+        let prog = netcore::upload_progress(&uploads);
         let mut out: Vec<InboxEntry> = vec![];
         // (rel path, size, mtime, incoming) — in-flight temps collapse onto the
         // final name so a receiving file shows up once, growing live.

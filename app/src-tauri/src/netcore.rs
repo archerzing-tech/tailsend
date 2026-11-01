@@ -544,9 +544,14 @@ pub type UploadRegistry = Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<Uploa
 // approximated as chunks*chunk (the tail chunk counts whole, clamped below).
 pub fn upload_progress(reg: &UploadRegistry) -> HashMap<String, (u64, u64)> {
     let mut m = HashMap::new();
-    for up in reg.lock().unwrap().values() {
-        // blocking_lock is fine here: callers run off the async runtime, and a
-        // held guard only means one 4 MiB chunk write is in flight.
+    // Poison-tolerant on purpose: this std mutex is shared with the receiver's
+    // own handlers, so if a panic ever holds it, a progress read must not
+    // cascade into begin/chunk/complete — into_inner moves past the poison.
+    let reg = reg.lock().unwrap_or_else(|e| e.into_inner());
+    for up in reg.values() {
+        // blocking_lock is fine here: callers run inside spawn_blocking (on
+        // the async runtime itself this panics — see the inbox_list call site),
+        // and a held guard only means one 4 MiB chunk write is in flight.
         let u = up.blocking_lock();
         if let Some(name) = u.tmp.file_name().and_then(|n| n.to_str()) {
             let got = (u.received.len() as u64)
@@ -1704,4 +1709,44 @@ pub fn human(n: i64) -> String {
 
 fn chrono_display() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // upload_progress must stay callable from a task ON the tokio runtime —
+    // the GUI's inbox poll used to call it there directly, and blocking_lock
+    // panicked ("Cannot block the current thread from within a runtime")
+    // while holding the registry's std mutex, poisoning it: every later
+    // receiver access panicked and all transfers died at begin/complete.
+    // inbox_list now reads progress inside spawn_blocking; this guards both.
+    #[test]
+    fn upload_progress_is_runtime_safe() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let reg: UploadRegistry = Arc::default();
+        let dir = std::env::temp_dir().join(format!("tailsend-progress-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = dir.join("receiving.bin.part");
+        let up = Arc::new(tokio::sync::Mutex::new(Upload {
+            final_path: dir.join("receiving.bin"),
+            tmp: tmp.clone(),
+            size: 10,
+            chunk: UPLOAD_CHUNK,
+            sender: "test".into(),
+            file: tokio::fs::File::from(std::fs::File::create(&tmp).unwrap()),
+            received: Default::default(),
+            last: std::time::Instant::now(),
+        }));
+        let name = tmp.file_name().unwrap().to_string_lossy().to_string();
+        reg.lock().unwrap().insert(name.clone(), up);
+        let got = rt.block_on(async move {
+            // spawn_blocking — exactly what the inbox_list call site uses.
+            tokio::task::spawn_blocking(move || upload_progress(&reg).remove(&name))
+                .await
+                .unwrap()
+        });
+        assert_eq!(got, Some((0, 10)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
