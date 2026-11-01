@@ -459,16 +459,36 @@ async function loadPeers() {
           : "设备列表还没就绪，几秒后自动重试";
         mount("peers").forEach((n) => { n.innerHTML = `<div class="empty">${hint}</div>`; });
         peers = [];
-      } else if (!saved.length) {
-        // Saved targets still render below — only nag when there is nothing.
-        bannerShow(d.error + "。不影响接收；也可以直接输入对方 IP 发送。");
-        mount("peers").forEach((n) => { n.innerHTML = peersFixHtml(d.state); });
-        peers = [];
       } else {
-        peers = [];
+        // 修复引导必须能活过下面的 renderPeers（LAN 合并会重绘列表）——记住
+        // 状态，renderPeers 在本该出现死胡同空文案的地方画修复面板。
+        peersFixState = d.state;
+        if (saved.length) {
+          peers = [];
+        } else {
+          bannerShow(d.error + "。不影响接收；也可以直接输入对方 IP 发送。");
+          mount("peers").forEach((n) => { n.innerHTML = peersFixHtml(d.state); });
+          peers = [];
+        }
+        // 自愈：服务没跑就自动拉起（macOS 静默、Linux 走 polkit、Windows 弹
+        // 一次 UAC）。两次判定——刚唤醒时 status 慢不该弹 UAC，连续两轮都
+        // daemon_down 才是真没在跑。
+        if (platform === "desktop" && d.state === "daemon_down") {
+          if (daemonDownStruck && !autoSvcTried) {
+            autoSvcTried = true;
+            invoke("tailscale_start_service")
+              .then(() => { toast("正在拉起 Tailscale 服务…", "ok"); boostPeers(); })
+              .catch(() => {});
+          } else {
+            daemonDownStruck = true;
+          }
+        } else if (d.state !== "daemon_down") {
+          daemonDownStruck = false;
+        }
       }
     } else {
       bannerHide();
+      peersFixState = null; // discovery is healthy again — the panel is moot
       if (d.self && d.self.name) {
         if (d.self.ip) rememberSelfIp(d.self.ip);
         if (selfName !== d.self.name) {
@@ -630,8 +650,12 @@ function renderPeers() {
     ? peers.filter((p) => (p.name || "").toLowerCase().includes(f) || (p.ip || "").toLowerCase().includes(f))
     : peers;
   if (!visible.length) {
-    const msg = peers.length ? "没有匹配的设备" : "tailnet 里还没有其他设备";
-    mount("peers").forEach((el) => { el.innerHTML = `<div class="empty">${msg}</div>`; });
+    // 发现失败且没有任何设备可显示时，不能死胡同式地丢一句空文案——修复
+    // 面板（带按钮）才是出路。
+    const html = !peers.length && peersFixState
+      ? peersFixHtml(peersFixState)
+      : `<div class="empty">${peers.length ? "没有匹配的设备" : "tailnet 里还没有其他设备"}</div>`;
+    mount("peers").forEach((el) => { el.innerHTML = html; });
     return;
   }
   // 状态语义：绿点 = 对方 Tailsend 真能收（可发送）；琥珀 = 节点在线但对方
@@ -896,6 +920,9 @@ let reqCur = null; // { id }
 let reqTimer = null;
 let autoRecvTried = false; // one auto-start attempt per node-running stretch
 let autoNodeTried = false; // one node-ensure attempt per app launch (mobile)
+let peersFixState = null; // discovery failure state for the fix panel (desktop)
+let daemonDownStruck = false; // daemon_down seen on the previous poll
+let autoSvcTried = false; // one auto service-start per app launch (desktop)
 
 function showRequest(p) {
   reqQueue.push(p);
