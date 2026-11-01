@@ -77,6 +77,7 @@ async function detectPlatform() {
 
 let recvSaveDir = "";
 let desktopListening = null; // desktop receiver state, from get_status
+let recvAddrs = { lan: "" }; // reachable addresses advertised by the receiver
 
 async function loadStatus() {
   try {
@@ -115,6 +116,7 @@ async function loadStatus() {
     dir.title = r.save_dir;
     dir.textContent = "保存到 " + r.save_dir;
     desktopListening = !!r.listening;
+    recvAddrs.lan = ((r.advertise || []).find((ip) => ip && !ip.startsWith("100."))) || "";
     syncHero();
     bannerHide();
   } catch (e) {
@@ -167,6 +169,17 @@ async function pollNode() {
   nodeStatus = st || null;
   nodeRunning = !!st && st.state === "running";
   syncNodeUI();
+  // LocalSend 逻辑：节点在跑，接收就默认是开的，不让人记得去开开关。
+  // 用户用开关显式关过（ts.recv.useroff）则尊重，不再自动拉起。
+  if (platform === "mobile" && st && st.state === "running" && st.receiver !== "on"
+      && !autoRecvTried && localStorage.getItem("ts.recv.useroff") !== "1") {
+    autoRecvTried = true;
+    invoke("node_start_receiver", {
+      token: localStorage.getItem("ts.token.v1") || "",
+      confirm: localStorage.getItem("ts.confirm.v1") !== "0",
+    }).then(pollNode).catch(() => {});
+  }
+  if (!st || st.state !== "running") autoRecvTried = false;
   // 手机发送的进度住在 Go 引擎里（Status.sending），事件层看不见——
   // 趁 3s 轮询映射到正在发送的那一行，让发送条真的动起来。
   const s = st && st.sending;
@@ -196,9 +209,15 @@ async function nodeToggleRecv() {
   const t = localStorage.getItem("ts.token.v1") || "";
   const confirm = localStorage.getItem("ts.confirm.v1") !== "0";
   try {
-    if (recvOn) await invoke("node_stop_receiver");
-    else await invoke("node_start_receiver", { token: t, confirm });
-    toast(recvOn ? "接收已关闭" : "接收已开启，收件地址 " + ((st && st.ip) || "") + ":4782", "ok");
+    if (recvOn) {
+      await invoke("node_stop_receiver");
+      localStorage.setItem("ts.recv.useroff", "1"); // keep auto-start off it
+    } else {
+      await invoke("node_start_receiver", { token: t, confirm });
+      localStorage.removeItem("ts.recv.useroff");
+    }
+    toast(recvOn ? "已关闭 Tailscale 接收（同一 Wi-Fi 的局域网接收不受影响）"
+                 : "接收已开启，收件地址 " + ((st && st.ip) || "") + ":4782", "ok");
   } catch (e) { nodeErr(e); }
   pollNode();
 }
@@ -212,13 +231,20 @@ function syncHero() {
   if (platform === "mobile") {
     const st = nodeStatus;
     const state = st ? st.state || "off" : "off";
-    if (state === "running") {
-      if (st.receiver === "on") { mode = "on"; text = "接收中 · " + (st.ip || "") + ":4782"; }
-      else { mode = "warn"; text = "接收已关闭 · 打开开关开始接收"; }
+    // LocalSend 逻辑：接收不是一个要人管理的状态。两条通道任一活着就是
+    // 「接收中」——局域网接收器常驻（Rust 侧），tailnet 接收看内置节点。
+    const lan = desktopListening === true;
+    const tsOn = state === "running" && st.receiver === "on";
+    if (lan || tsOn) {
+      mode = "on";
+      const parts = [];
+      if (lan) parts.push("局域网" + (recvAddrs.lan ? " " + recvAddrs.lan + ":4782" : ""));
+      if (tsOn) parts.push("Tailscale " + (st.ip || "") + ":4782");
+      text = "接收中 · " + parts.join(" · ");
     } else if (state === "starting") { mode = "warn"; text = "节点启动中…"; }
-    else if (state === "needs_login") { mode = "warn"; text = "需要先登录 · 在「本机」页登录"; }
-    else if (state === "error") { mode = "warn"; text = "节点出错 · 在「本机」页重试"; }
-    else { mode = "warn"; text = "内置节点未启用 · 在「本机」页启动"; }
+    else if (state === "needs_login") { mode = "warn"; text = "同一 Wi-Fi 可收 · 跨网接收需登录（「本机」页）"; }
+    else if (state === "error") { mode = "warn"; text = "节点出错 · 局域网仍可收；跨网在「本机」页重试"; }
+    else { mode = "warn"; text = "同一 Wi-Fi 可收 · 跨网接收需启动节点（「本机」页）"; }
   } else {
     if (desktopListening === null) { mode = "warn"; text = "检测中…"; }
     else if (desktopListening) { mode = "on"; text = "接收中 · 等待对方发送"; }
@@ -300,9 +326,9 @@ function syncNodeUI() {
       body.innerHTML = `
         <p class="node-meta">本机节点 <b class="mono">${esc(st.ip || "")}</b>${st.tailnet ? " · " + esc(st.tailnet) : ""}</p>
         <div class="node-actions">
-          <button class="${recvOn ? "ghost" : "primary"}" data-nact="recv">${recvOn ? "关闭接收" : "开启接收"}</button>
+          <button class="${recvOn ? "ghost" : "primary"}" data-nact="recv">${recvOn ? "关闭 Tailscale 接收" : "开启 Tailscale 接收"}</button>
         </div>
-        <p class="node-hint">接收的文件在「接收」页查看；收件箱会自动合并应用目录。</p>`;
+        <p class="node-hint">这个开关只管跨网（Tailscale）接收；同一 Wi-Fi 的局域网接收始终可用。收到的文件都在「接收」页。</p>`;
     } else if (state === "error") {
       body.innerHTML = `
         <p class="node-hint err">${esc(st.error || "节点出错")}</p>
@@ -904,6 +930,7 @@ function updateRow(item) {
 let reqQueue = [];
 let reqCur = null; // { id }
 let reqTimer = null;
+let autoRecvTried = false; // one auto-start attempt per node-running stretch
 
 function showRequest(p) {
   reqQueue.push(p);

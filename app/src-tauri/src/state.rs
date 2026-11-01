@@ -223,7 +223,9 @@ async fn resolve_bind() -> Result<(String, Vec<String>), String> {
     {
         // The VPN interface's address isn't bindable from userspace on mobile;
         // 0.0.0.0 covers the LAN side, the tsnet listener covers the tailnet.
-        Ok(("0.0.0.0".to_string(), vec![]))
+        // Advertise the LAN IP so the UI can show where same-Wi-Fi senders
+        // should aim.
+        Ok(("0.0.0.0".to_string(), crate::landisco::lan_ips().into_iter().take(1).collect()))
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {

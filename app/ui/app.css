@@ -1188,6 +1188,9 @@ body[data-platform="mobile"] .idel { opacity: 1; }
 }
 .req-card {
   width: min(400px, 100%);
+  /* Small desktop windows must never clip the card's top (buttons live low). */
+  max-height: calc(100vh - 40px);
+  overflow-y: auto;
   background: var(--card);
   border-radius: var(--r-xl);
   box-shadow: var(--shadow);
@@ -1262,12 +1265,31 @@ body[data-platform="mobile"] .idel { opacity: 1; }
 }
 .req-btns .ghost:hover { background: var(--red-bg); border-color: var(--red); }
 
+/* 手机端：真正的底部弹层。旧写法靠 grid + align-self:end，卡片比窗口高
+   时顶部直接被裁出屏幕（顶部的标题和倒计时看不见）。改为 flex 底部吸附，
+   卡片自身限高、内部滚动，任何机型都不会超出窗口。 */
+body[data-platform="mobile"] .req-backdrop {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 16px 16px 0;
+}
 body[data-platform="mobile"] .req-card {
-  align-self: end;
+  align-self: auto;
   width: 100%;
+  max-height: calc(100vh - 32px);
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
   margin-bottom: 0;
   border-radius: var(--r-xl) var(--r-xl) 0 0;
-  padding-bottom: calc(20px + env(safe-area-inset-bottom));
+  padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+}
+body[data-platform="mobile"] .req-files {
+  max-height: 32vh;
+  max-height: 32dvh;
+  flex: none;
 }
 
 /* ------------------------------------------------------------ toasts */
