@@ -25,5 +25,10 @@ echo "gomobile bind → $AAR (a few minutes on a cold cache)"
 
 # Assertions — a silent miss here ships an APK without the node.
 test -s "$AAR"
-unzip -l "$AAR" | /usr/bin/grep -q 'jni/arm64-v8a/libgojni.so'
+# grep without -q: it drains the pipe so unzip can't die of SIGPIPE (141)
+# under set -o pipefail when it exits early on a match.
+if ! unzip -l "$AAR" | /usr/bin/grep 'jni/arm64-v8a/libgojni.so' > /dev/null; then
+  echo "AAR missing libgojni.so" >&2
+  exit 1
+fi
 echo "AAR ready: $(du -h "$AAR" | cut -f1) $AAR"
