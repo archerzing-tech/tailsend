@@ -159,6 +159,16 @@ async function pollNode() {
   nodeStatus = st || null;
   nodeRunning = !!st && st.state === "running";
   syncNodeUI();
+  // 手机发送的进度住在 Go 引擎里（Status.sending），事件层看不见——
+  // 趁 3s 轮询映射到正在发送的那一行，让发送条真的动起来。
+  const s = st && st.sending;
+  if (s && sending) {
+    const item = items.find((i) => i.status === "sending" && i.rel === s.rel);
+    if (item && item.loaded !== s.got) {
+      item.loaded = s.got;
+      updateRow(item);
+    }
+  }
 }
 
 function nodeErr(e) { toast(String((e && e.message) || e), "err"); }
@@ -437,12 +447,23 @@ async function loadPeers() {
     if (!d) d = await invoke("list_peers");
     const saved = loadSaved();
     if (d.error) {
-      // Saved targets still render below — only nag when there is nothing.
-      if (!saved.length) {
+      // 手机上 list_peers 永远失败（没有 CLI）——这不是故障，只是路线没选对；
+      // 设备表的来源是内置节点。提示要引导启动/登录，而不是甩一句吓人的报错。
+      if (platform === "mobile") {
+        bannerHide();
+        const hint = !nodeRunning
+          ? "内置节点还没就绪——在「本机」页启动并登录后，设备会出现在这里"
+          : "设备列表还没就绪，几秒后自动重试";
+        mount("peers").forEach((n) => { n.innerHTML = `<div class="empty">${hint}</div>`; });
+        peers = [];
+      } else if (!saved.length) {
+        // Saved targets still render below — only nag when there is nothing.
         bannerShow(d.error + "。不影响接收；也可以直接输入对方 IP 发送。");
         mount("peers").forEach((n) => { n.innerHTML = '<div class="empty">暂时无法读取设备列表</div>'; });
+        peers = [];
+      } else {
+        peers = [];
       }
-      peers = [];
     } else {
       bannerHide();
       if (d.self && d.self.name) {
@@ -559,6 +580,24 @@ function renderPeers() {
     : p.recv === false && p.online ? '<i class="stat b-idle">未运行</i>'
     : p.online ? '<i class="stat b-on">在线</i>'
     : '<i class="stat b-dim">离线</i>';
+  // 本机固定在列表最上面：标出、不可选。用户明确定调过——保留可见性，
+  // 点击解释原因，避免"我的手机怎么不在列表里"的困惑。
+  const selfRow = selfIp
+    ? `<div class="dev self" data-self="1" title="这台设备就是本机，不能发给自己">
+        <span class="ava me" aria-hidden="true"><svg viewBox="0 0 1024 1024"><use href="#bird"/></svg><i class="dot"></i></span>
+        <span class="dmeta">
+          <span class="dname"><span class="nm">${esc(selfName || "本机")}</span></span>
+          <span class="dsub"><span class="ip mono">${esc(selfIp)}</span><i class="stat b-dim">本机</i></span>
+        </span>
+      </div>`
+    : "";
+  if (!visible.length) {
+    const msg = peers.length ? "没有匹配的设备" : "tailnet 里还没有其他设备";
+    mount("peers").forEach((el) => {
+      el.innerHTML = selfRow + `<div class="empty">${msg}</div>`;
+    });
+    return;
+  }
   const html = visible.map((p) => {
     const i = peers.indexOf(p);
     const sel = targets.some((t) => t.key === peerKey(p));
@@ -575,7 +614,7 @@ function renderPeers() {
       <i class="ck" aria-hidden="true">✓</i>
     </div>`;
   }).join("");
-  mount("peers").forEach((el) => { el.innerHTML = html; });
+  mount("peers").forEach((el) => { el.innerHTML = selfRow + html; });
 }
 
 function choosePeer(i) {
@@ -1116,6 +1155,11 @@ function wire() {
   onAll("open-inbox", async () => {
     try { await invoke("open_inbox"); } catch (e) { toast(String(e), "err"); }
   });
+  // 手机没有"打开文件夹"的概念（沙盒里也没有系统文件管理器可跳）——收到的
+  // 文件直接点列表里的文件名就能打开。留着这个按钮只会让人点了个寂寞。
+  if (platform === "mobile") {
+    bindAll("open-inbox", (b) => { b.hidden = true; });
+  }
   // 确认接收开关（协议 v3）：默认开——收到的传输先确认再落盘。
   const applyConfirm = () => {
     let on = true;
@@ -1216,11 +1260,20 @@ function wire() {
         return;
       }
       const row = e.target.closest(".dev");
+      if (row && row.dataset.self) {
+        toast("这台设备就是本机——不能发给自己，选其他设备吧");
+        return;
+      }
       if (row) choosePeer(+row.dataset.i);
     });
     el.addEventListener("keydown", (e) => {
       if (e.key !== "Enter" && e.key !== " ") return;
       const row = e.target.closest(".dev");
+      if (row && row.dataset.self) {
+        e.preventDefault();
+        toast("这台设备就是本机——不能发给自己，选其他设备吧");
+        return;
+      }
       if (row) {
         e.preventDefault();
         choosePeer(+row.dataset.i);

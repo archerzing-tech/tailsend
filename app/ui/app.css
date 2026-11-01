@@ -664,6 +664,11 @@ body[data-platform="mobile"] .devs {
 .dev.off { opacity: .55; cursor: default; }
 /* 离线卡不可点：hover 不给任何可点的暗示 */
 .dev.off:hover { border-color: var(--line); }
+/* 本机卡：永远在列表顶部，标出但不可选——点它只会得到一句解释 */
+.dev.self { cursor: default; background: var(--paper-2); }
+.dev.self:hover { border-color: var(--line); }
+.dev.self .ck { display: none; }
+.dev.self .ava.me svg { fill: var(--blue-ink); }
 .dev.fresh { animation: freshring 1.4s ease; }
 @keyframes freshring {
   0% { border-color: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 30%, transparent); }

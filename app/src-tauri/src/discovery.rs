@@ -60,6 +60,15 @@ fn cli_bin() -> String {
             }
         }
     }
+    // Windows GUI installs usually put the CLI on PATH, but Store/zip
+    // deployments don't — check the standard installer location.
+    #[cfg(target_os = "windows")]
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        let cand = std::path::Path::new(&pf).join("Tailscale").join(&exe);
+        if cand.is_file() {
+            return cand.display().to_string();
+        }
+    }
     let fallbacks = [
         "/usr/local/bin/tailscale",
         "/opt/homebrew/bin/tailscale",
@@ -93,7 +102,9 @@ pub async fn status() -> Result<(SelfInfo, Vec<Peer>), String> {
     let out = cmd
         .output()
         .await
-        .map_err(|_| format!("无法运行 {}：请确认已安装 Tailscale", cli_bin()))?;
+        .map_err(|_| {
+            "没有找到 Tailscale 命令行（CLI）：请确认已安装并至少打开过一次 Tailscale 客户端".to_string()
+        })?;
     if !out.status.success() {
         let msg = String::from_utf8_lossy(&out.stderr);
         return Err(format!("tailscale status 失败：{}", msg.trim()));
