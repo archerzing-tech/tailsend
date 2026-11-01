@@ -736,6 +736,7 @@ body[data-platform="mobile"] .devs {
 .b-ok { background: var(--green-bg); color: var(--green); }
 .b-idle { background: var(--amber-bg); color: var(--amber); }
 .b-on { background: var(--sky); color: var(--blue-ink); }
+.b-lan { background: var(--sky); color: var(--blue); }
 .b-dim { background: var(--paper-2); color: var(--mut); }
 .dsub {
   display: flex;

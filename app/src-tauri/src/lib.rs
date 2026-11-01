@@ -1,6 +1,7 @@
 // Shared entry: desktop binary and mobile (Android/iOS) library both start here.
 mod commands;
 mod discovery;
+mod landisco;
 mod netcore;
 pub mod selftest;
 mod state;
@@ -13,6 +14,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
             commands::list_peers,
+            commands::lan_scan,
             commands::open_url,
             commands::tailscale_login,
             commands::tailscale_start_service,

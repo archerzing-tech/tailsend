@@ -33,6 +33,14 @@ pub async fn list_peers() -> serde_json::Value {
     }
 }
 
+// One LAN direct-channel sweep: broadcast a discovery probe on every
+// interface, answer-collect for under a second. The UI merges the replies
+// into the peer list next to tailnet devices.
+#[tauri::command]
+pub async fn lan_scan() -> Result<Vec<crate::landisco::LanPeer>, String> {
+    Ok(crate::landisco::scan(std::time::Duration::from_millis(900)).await)
+}
+
 // Desktop helpers behind the peers page's Tailscale guidance buttons. Mobile
 // runs the embedded tsnet node instead, so none of these apply there.
 

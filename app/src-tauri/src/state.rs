@@ -155,6 +155,7 @@ pub async fn start_receiver(app: &tauri::AppHandle, state: &AppState) -> Result<
     };
 
     let (tx, mut rx) = watch::channel(());
+    let rx_lan = rx.clone();
     let cfg = {
         let rs = state.recv.lock().unwrap();
         crate::netcore::RecvCfg {
@@ -177,6 +178,13 @@ pub async fn start_receiver(app: &tauri::AppHandle, state: &AppState) -> Result<
             tauri::async_runtime::spawn_blocking(move || crate::netcore::sweep_spools(&dir)).await;
     }
     tauri::async_runtime::spawn(crate::netcore::janitor(cfg.clone()));
+    // LAN discovery answerer — same lifetime as the TCP server: it only
+    // claims "我在这里" while a receiver is actually up.
+    tauri::async_runtime::spawn(crate::landisco::serve_responder(
+        crate::netcore::host_name(),
+        port,
+        rx_lan,
+    ));
     let serve = axum::serve(
         ln,
         crate::netcore::router(cfg).into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -214,13 +222,25 @@ async fn resolve_bind() -> Result<(String, Vec<String>), String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         // The VPN interface's address isn't bindable from userspace on mobile;
-        // 0.0.0.0 stays unreachable off the tailnet in practice.
+        // 0.0.0.0 covers the LAN side, the tsnet listener covers the tailnet.
         Ok(("0.0.0.0".to_string(), vec![]))
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let ip = crate::discovery::primary_ip().await?;
-        Ok((ip.clone(), vec![ip]))
+        // Bind every interface: receiving must not depend on Tailscale being
+        // connected (LAN direct channel). Advertise the tailnet IP first
+        // (works from anywhere), then a LAN IP (works on the same Wi-Fi).
+        let mut advertise = Vec::new();
+        if let Ok(ip) = crate::discovery::primary_ip().await {
+            advertise.push(ip);
+        }
+        for ip in crate::landisco::lan_ips() {
+            if !advertise.contains(&ip) {
+                advertise.push(ip);
+                break;
+            }
+        }
+        Ok(("0.0.0.0".to_string(), advertise))
     }
 }
 

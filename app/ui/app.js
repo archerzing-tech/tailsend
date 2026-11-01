@@ -87,7 +87,15 @@ async function loadStatus() {
     const chip = $("chip-recv");
     if (r.listening) {
       chip.className = "seg ok";
-      chip.innerHTML = '<i class="dot"></i>接收中 <b class="mono">' + esc(r.addr) + "</b>";
+      // Receiver binds every interface now — show where it's actually
+      // reachable instead of the raw 0.0.0.0 bind address.
+      const port = (r.addr || "").split(":").pop() || "";
+      let ips = Array.isArray(r.advertise) ? r.advertise.filter(Boolean) : [];
+      if (!ips.length) ips = ["0.0.0.0"];
+      const label = ips
+        .map((ip) => (ip === "0.0.0.0" ? "本网络" : ip) + ":" + port)
+        .join(" / ");
+      chip.innerHTML = '<i class="dot"></i>接收中 <b class="mono">' + esc(label) + "</b>";
     } else {
       chip.className = "seg warn";
       chip.innerHTML = '<i class="dot"></i>接收端未运行';
@@ -435,6 +443,9 @@ async function loadPeers() {
   peersLoading = true;
   bindAll("peers-refresh", (b) => { b.disabled = true; });
   try {
+    // LAN direct channel: sweep the local subnets in parallel with tailnet
+    // discovery (~1s) so the same Wi-Fi works with Tailscale down.
+    const lanP = invoke("lan_scan").then((v) => { lanPeers = v || []; }).catch(() => {});
     // 内置节点在跑：tsnet 自己就握着整个 tailnet 的设备表，不依赖 CLI
     // （手机上 CLI 永远不存在）。失败或未跑再走 list_peers/discover 老路。
     let d = null;
@@ -520,6 +531,10 @@ async function loadPeers() {
         disc: true,
       });
     });
+    // 局域网直连：把同网扫描到的设备并进列表（Tailscale 不在也有东西可发）。
+    // 同一台设备两条路都通时会显示两行（100.x + 局域网 IP），LAN 行带徽章。
+    await lanP;
+    mergeLanPeers();
     peers.sort((a, b) => (b.online ? 1 : 0) - (a.online ? 1 : 0));
     renderPeers(); // immediate paint: discovery status + saved probes
 
@@ -575,6 +590,23 @@ function peersFixHtml(state) {
   return `<div class="empty">${f.tip}<br><button class="fix-btn" data-peers-fix="${f.act}">${f.btn}</button></div>`;
 }
 let peersBoost = null; // fix action fired → poll fast so the list snaps in
+function mergeLanPeers() {
+  for (const l of lanPeers) {
+    if (!l.ip) continue;
+    const hit = peers.find((p) => p.ip === l.ip);
+    if (hit) { hit.lan = true; continue; }
+    peers.push({
+      ip: l.ip,
+      name: l.name || l.ip,
+      online: true, // replied to the probe — it's up on this network
+      recv: undefined,
+      os: "",
+      fqdn: "",
+      saved: false,
+      lan: true,
+    });
+  }
+}
 function boostPeers() {
   if (peersBoost) return;
   const until = Date.now() + 120000;
@@ -651,7 +683,7 @@ function renderPeers() {
       <span class="ava ${sClass(p)}" aria-hidden="true">${osAvatar(p.os)}<i class="dot"></i></span>
       <span class="dmeta">
         <span class="dname">${p.saved ? '<i class="star" title="常用设备">★</i>' : ""}<span class="nm">${esc(p.name)}</span></span>
-        <span class="dsub"><span class="ip mono">${esc(p.ip)}</span>${stat(p)}</span>
+        <span class="dsub"><span class="ip mono">${esc(p.ip)}</span>${p.lan ? '<i class="stat b-lan">局域网</i>' : ""}${stat(p)}</span>
       </span>
       ${p.saved ? `<button class="fx-del" data-del="${esc(p.ip)}" title="移除常用">✕</button>` : ""}
       <i class="ck" aria-hidden="true">✓</i>
@@ -1460,6 +1492,7 @@ function wire() {
 }
 
 let peers = [];
+let lanPeers = []; // LAN direct-channel replies from the latest lan_scan sweep
 let targets = []; // [{ key, label, addr }] — a send fans out to every entry (1:N)
 let items = [];
 let itemSeq = 0;
