@@ -1240,7 +1240,10 @@ async function loadInbox() {
       const base = f.path.split("/").pop();
       const dir = f.path.includes("/") ? f.path.slice(0, f.path.lastIndexOf("/")) : "";
       const k = fileKind(base);
-      const fresh = !f.incoming && !knownInbox.has(f.path);
+      // root|path 才是唯一键：同名文件在两个收件根各有一份（局域网收的 vs
+      // 内置节点收的）时，它们是两份独立文件，各自的删除/打开只针对自己。
+      const armKey = (f.root || 0) + "|" + f.path;
+      const fresh = !f.incoming && !knownInbox.has(armKey);
       let bar = "";
       let sub;
       if (f.incoming) {
@@ -1252,16 +1255,16 @@ async function loadInbox() {
         sub = `${dir ? esc(dir) + " · " : ""}${fmtSize(f.size)} · ${fmtTime(f.mtime)}`;
       }
       const del = f.incoming ? "" :
-        `<button class="idel${armedDelete === f.path ? " arm" : ""}" data-path="${esc(f.path)}"
-           title="删除" aria-label="删除 ${esc(base)}">${armedDelete === f.path ? "确认删除" : "✕"}</button>`;
-      return `<li class="${f.incoming ? "in " : ""}${fresh ? "new" : ""}" data-path="${esc(f.path)}" title="${esc(f.path)}">
+        `<button class="idel${armedDelete === armKey ? " arm" : ""}" data-path="${esc(f.path)}" data-root="${f.root || 0}"
+           title="删除" aria-label="删除 ${esc(base)}">${armedDelete === armKey ? "确认删除" : "✕"}</button>`;
+      return `<li class="${f.incoming ? "in " : ""}${fresh ? "new" : ""}" data-path="${esc(f.path)}" data-root="${f.root || 0}" title="${esc(f.path)}">
         <span class="itic k-${k}">${FILE_ICONS[k]}</span>
         <span class="imeta"><span class="iname">${esc(base)}</span><span class="isub">${sub}</span>${bar}</span>${del}
       </li>`;
     }).join("");
     mount("inbox").forEach((el) => { el.innerHTML = html; });
-    d.files.forEach((f) => { if (!f.incoming) knownInbox.add(f.path); });
-    if (armedDelete && !d.files.some((f) => f.path === armedDelete)) armedDelete = null;
+    d.files.forEach((f) => { if (!f.incoming) knownInbox.add((f.root || 0) + "|" + f.path); });
+    if (armedDelete && !d.files.some((f) => (f.root || 0) + "|" + f.path === armedDelete)) armedDelete = null;
   } catch (_) { /* receiver dir may not exist yet */ }
 }
 
@@ -1350,25 +1353,27 @@ function wire() {
         // 点文件名 → 系统查看器（接收中的临时文件不可开）
         const li = e.target.closest("li[data-path]");
         if (li && !li.classList.contains("in")) {
-          try { await invoke("open_inbox", { path: li.dataset.path }); }
+          try { await invoke("open_inbox", { path: li.dataset.path, root: Number(li.dataset.root || 0) }); }
           catch (err) { toast(String(err), "err"); }
         }
         return;
       }
+      const root = Number(btn.closest("li[data-path]")?.dataset.root || 0);
       const p = btn.dataset.path;
-      if (armedDelete !== p) {
-        armedDelete = p;
+      const armKey = root + "|" + p;
+      if (armedDelete !== armKey) {
+        armedDelete = armKey;
         mount("inbox").forEach((n) => {
-          n.querySelectorAll(`.idel[data-path="${CSS.escape(p)}"]`).forEach((b) => {
+          n.querySelectorAll(`.idel[data-path="${CSS.escape(p)}"][data-root="${root}"]`).forEach((b) => {
             b.classList.add("arm");
             b.textContent = "确认删除";
           });
         });
         setTimeout(() => {
-          if (armedDelete === p) {
+          if (armedDelete === armKey) {
             armedDelete = null;
             mount("inbox").forEach((n) => {
-              n.querySelectorAll(`.idel[data-path="${CSS.escape(p)}"]`).forEach((b) => {
+              n.querySelectorAll(`.idel[data-path="${CSS.escape(p)}"][data-root="${root}"]`).forEach((b) => {
                 b.classList.remove("arm");
                 b.textContent = "✕";
               });
@@ -1380,7 +1385,7 @@ function wire() {
       armedDelete = null;
       btn.disabled = true;
       try {
-        await invoke("inbox_delete", { path: p });
+        await invoke("inbox_delete", { path: p, root });
         toast(`已删除 ${p.split("/").pop()}`);
       } catch (err) {
         toast(String(err), "err");

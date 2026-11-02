@@ -775,6 +775,11 @@ struct InboxEntry {
     mtime: u64,
     #[serde(default)]
     incoming: bool,
+    // Which inbox root this entry was scanned from (index into inbox_roots).
+    // The same rel can exist in two roots (Rust receiver vs embedded node's
+    // inbox on Android) — those are distinct files, and delete/open must
+    // target the copy this row shows, not whichever root matches first.
+    root: u32,
 }
 
 /// A `.tspart-*`/`.part-*` temp file back to its original name and relative dir.
@@ -851,11 +856,13 @@ pub async fn inbox_list(
         // final name so a receiving file shows up once, growing live.
         let mut incoming: std::collections::HashMap<String, InboxEntry> =
             std::collections::HashMap::new();
-        let mut seen = std::collections::HashSet::new();
-        for dir in inbox_roots(&app, &dir) {
-            scan_inbox_dir(&dir, &prog, &mut out, &mut incoming, &mut seen);
+        for (idx, dir) in inbox_roots(&app, &dir).into_iter().enumerate() {
+            scan_inbox_dir(&dir, idx as u32, &prog, &mut out, &mut incoming);
         }
-        let total = seen.len();
+        // No cross-root dedupe: the same rel in two roots is two files (sent
+        // once over LAN, once over the tailnet). Collapsing them used to make
+        // delete remove only the first root's copy while the row lived on.
+        let total = out.len() + incoming.len();
         let mut inc: Vec<InboxEntry> = incoming.into_values().collect();
         inc.sort_by(|a, b| b.mtime.cmp(&a.mtime));
         out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
@@ -872,6 +879,7 @@ pub async fn inbox_delete(
     app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
     path: String,
+    root: Option<u32>,
 ) -> Result<(), String> {
     let dir = state.recv.lock().unwrap().save_dir.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -885,10 +893,17 @@ pub async fn inbox_delete(
             return Err("文件还在接收中，暂时不能删除".into());
         }
         let mut hit: Option<(std::path::PathBuf, std::path::PathBuf)> = None;
-        for root in inbox_roots(&app, &dir) {
-            if let Ok(full) = netcore::safe_join(&root, &path) {
+        for (idx, r) in inbox_roots(&app, &dir).into_iter().enumerate() {
+            // The row names its root — delete THAT copy. The same rel in
+            // another root is a different file and must survive.
+            if let Some(want) = root {
+                if want != idx as u32 {
+                    continue;
+                }
+            }
+            if let Ok(full) = netcore::safe_join(&r, &path) {
                 if full.symlink_metadata().is_ok() {
-                    hit = Some((full, root));
+                    hit = Some((full, r));
                     break;
                 }
             }
@@ -944,10 +959,10 @@ fn inbox_roots(app: &tauri::AppHandle, save_dir: &std::path::Path) -> Vec<std::p
 
 fn scan_inbox_dir(
     dir: &std::path::Path,
+    root_idx: u32,
     prog: &std::collections::HashMap<String, (u64, u64)>,
     out: &mut Vec<InboxEntry>,
     incoming: &mut std::collections::HashMap<String, InboxEntry>,
-    seen: &mut std::collections::HashSet<String>,
 ) {
     for e in walkdir::WalkDir::new(dir).into_iter().filter_map(|r| r.ok()) {
         if !e.file_type().is_file() {
@@ -961,9 +976,6 @@ fn scan_inbox_dir(
             .map(|c| c.as_os_str().to_string_lossy().to_string())
             .collect::<Vec<_>>()
             .join("/");
-        if !seen.insert(rel.clone()) {
-            continue; // same rel name in both roots — first root wins
-        }
         let (size, mtime) = match e.metadata() {
             Ok(m) => (
                 m.len(),
@@ -987,6 +999,7 @@ fn scan_inbox_dir(
                 total: 0,
                 mtime: 0,
                 incoming: true,
+                root: root_idx,
             });
             slot.size += size; // parallel chunks land in separate temps
             slot.total += total;
@@ -999,6 +1012,7 @@ fn scan_inbox_dir(
             total: 0,
             mtime,
             incoming: false,
+            root: root_idx,
         });
     }
 }
@@ -1009,6 +1023,7 @@ pub async fn open_inbox(
     state: tauri::State<'_, AppState>,
     node: tauri::State<'_, NodeState>,
     path: Option<String>,
+    root: Option<u32>,
 ) -> Result<(), String> {
     // The inbox lists paths relative to whichever root it scanned from; hand
     // the UI's rel path back and open the root where the file actually is.
@@ -1016,7 +1031,10 @@ pub async fn open_inbox(
     let target = path.as_deref().filter(|p| !p.is_empty()).and_then(|p| {
         inbox_roots(&app, &state.recv.lock().unwrap().save_dir)
             .into_iter()
-            .map(|root| root.join(p))
+            .enumerate()
+            // Same rel in two roots — open the copy the row was showing.
+            .filter(|(idx, _)| root.map_or(true, |r| r == *idx as u32))
+            .map(|(_, r)| r.join(p))
             .find(|c| c.exists())
     });
     // Android has no "open folder" concept — hand a single file to the
